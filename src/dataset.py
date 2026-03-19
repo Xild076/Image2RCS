@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Dict, List, Literal, Sequence, Tuple
 
@@ -105,15 +106,24 @@ def inverse_transform_target_tensor(values: torch.Tensor, mode: str = "log1p") -
 
 
 class ImageTensorCache:
-    def __init__(self, mode: CacheMode = "disk", cache_dir: str | Path | None = None):
+    def __init__(
+        self,
+        mode: CacheMode = "disk",
+        cache_dir: str | Path | None = None,
+        max_memory_items: int = 256,
+    ):
         self.mode: CacheMode = mode
         self.cache_dir = Path(cache_dir) if cache_dir is not None else DEFAULT_CACHE_DIR
         if self.mode == "disk":
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._memory_cache: Dict[str, torch.Tensor] = {}
+        if max_memory_items < 1:
+            raise ValueError("max_memory_items must be >= 1")
+        self.max_memory_items = int(max_memory_items)
+        self._memory_cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self.hits = 0
         self.misses = 0
         self.writes = 0
+        self.evictions = 0
 
     def _cache_identity(self, image_path: Path) -> str:
         resolved = image_path.resolve()
@@ -155,10 +165,14 @@ class ImageTensorCache:
         if self.mode == "memory":
             cached = self._memory_cache.get(cache_identity)
             if cached is not None:
+                self._memory_cache.move_to_end(cache_identity)
                 self.hits += 1
                 return cached
             tensor = self._decode_to_tensor(image_path)
             self._memory_cache[cache_identity] = tensor
+            if len(self._memory_cache) > self.max_memory_items:
+                self._memory_cache.popitem(last=False)
+                self.evictions += 1
             self.misses += 1
             return tensor
 
@@ -184,7 +198,13 @@ class ImageTensorCache:
         return tensor
 
     def stats(self) -> dict[str, int]:
-        return {"hits": self.hits, "misses": self.misses, "writes": self.writes}
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "writes": self.writes,
+            "evictions": self.evictions,
+            "memory_entries": len(self._memory_cache),
+        }
 
 
 class AircraftRCSDataset(Dataset):
@@ -195,11 +215,16 @@ class AircraftRCSDataset(Dataset):
         target_mode: str = "log1p",
         cache_mode: CacheMode = "disk",
         cache_dir: str | Path | None = None,
+        memory_cache_items: int = 256,
     ):
         self.samples = list(samples)
         self.image_transform = image_transform if image_transform is not None else build_image_transform()
         self.target_mode = target_mode
-        self.image_cache = ImageTensorCache(mode=cache_mode, cache_dir=cache_dir)
+        self.image_cache = ImageTensorCache(
+            mode=cache_mode,
+            cache_dir=cache_dir,
+            max_memory_items=memory_cache_items,
+        )
 
         targets = [transform_target(float(rcs_value), mode=target_mode) for _, rcs_value in self.samples]
         self.targets = torch.tensor(targets, dtype=torch.float32).unsqueeze(1)

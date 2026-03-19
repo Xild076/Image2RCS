@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import re
@@ -91,6 +92,7 @@ class RenderConfig:
     elevation_step_deg: int
     fit_margin: float = FIT_MARGIN
     extent_margin: float = EXTENT_MARGIN
+    gc_every_frames: int = 40
     orientation_modes: tuple[tuple[str, float], ...] = DEFAULT_ORIENTATION_MODES
 
     @property
@@ -288,14 +290,51 @@ def look_at(
     return pose
 
 
+def load_mesh_asset(mesh_path: Path):
+    try:
+        return trimesh.load(mesh_path, force="scene", process=False)
+    except TypeError:
+        return trimesh.load(mesh_path, force="scene")
+
+
+def save_png_array(color_buffer: np.ndarray, output_path: Path) -> None:
+    image = Image.fromarray(color_buffer)
+    try:
+        image.save(output_path)
+    finally:
+        image.close()
+
+
+def release_scene(scene: pyrender.Scene | None) -> None:
+    if scene is None:
+        return
+    for node in list(scene.get_nodes()):
+        try:
+            scene.remove_node(node)
+        except Exception:
+            pass
+
+
+def safe_remove_node(scene: pyrender.Scene | None, node: pyrender.Node | None) -> None:
+    if scene is None or node is None:
+        return
+    try:
+        scene.remove_node(node)
+    except Exception:
+        pass
+
+
 def build_scene(mesh_path: Path):
     check_missing_textures(mesh_path)
-    loaded = trimesh.load(mesh_path)
+    loaded = load_mesh_asset(mesh_path)
     renderable = to_renderable_meshes(loaded)
     mesh_center, mesh_extents, mesh_diagonal = compute_bounds(renderable)
 
     scene = pyrender.Scene(bg_color=SKY_PRESETS[0]["bg_color"], ambient_light=SKY_PRESETS[0]["ambient"])
     scene.add(build_pyrender_mesh(mesh_path, renderable))
+
+    del renderable
+    del loaded
 
     camera_yfov = np.pi / 3.0
     object_radius = max(mesh_diagonal * 0.5, 1e-3)
@@ -351,7 +390,9 @@ def apply_environment_lighting(
     base_radius: float,
     sky: dict,
     light: dict,
-) -> list[pyrender.Node]:
+    dir_node: pyrender.Node | None = None,
+    fill_node: pyrender.Node | None = None,
+) -> tuple[pyrender.Node, pyrender.Node]:
     scene.bg_color = sky["bg_color"]
     scene.ambient_light = sky["ambient"]
 
@@ -364,15 +405,29 @@ def apply_environment_lighting(
     fill_pose = np.eye(4)
     fill_pose[:3, 3] = fill_pos
 
-    dir_node = scene.add(
-        pyrender.DirectionalLight(color=np.ones(3), intensity=float(sky["dir_intensity"])),
-        pose=dir_pose,
-    )
-    fill_node = scene.add(
-        pyrender.PointLight(color=np.ones(3), intensity=float(sky["fill_intensity"])),
-        pose=fill_pose,
-    )
-    return [dir_node, fill_node]
+    if dir_node is None:
+        dir_node = scene.add(
+            pyrender.DirectionalLight(color=np.ones(3), intensity=float(sky["dir_intensity"])),
+            pose=dir_pose,
+        )
+    else:
+        scene.set_pose(dir_node, pose=dir_pose)
+        dir_light = dir_node.light
+        if isinstance(dir_light, pyrender.DirectionalLight):
+            dir_light.intensity = float(sky["dir_intensity"])
+
+    if fill_node is None:
+        fill_node = scene.add(
+            pyrender.PointLight(color=np.ones(3), intensity=float(sky["fill_intensity"])),
+            pose=fill_pose,
+        )
+    else:
+        scene.set_pose(fill_node, pose=fill_pose)
+        fill_light = fill_node.light
+        if isinstance(fill_light, pyrender.PointLight):
+            fill_light.intensity = float(sky["fill_intensity"])
+
+    return dir_node, fill_node
 
 
 def mesh_signature(mesh_path: Path) -> str:
@@ -418,7 +473,13 @@ def save_review_sheet(images: list[Path], sheet_path: Path, columns: int = 4, th
     canvas.save(sheet_path)
 
 
-def render_review_pack(mesh_path: Path, render_root: Path, approvals_root: Path, preview_size: int = 640) -> Path:
+def render_review_pack(
+    mesh_path: Path,
+    render_root: Path,
+    approvals_root: Path,
+    preview_size: int = 512,
+    gc_every_frames: int = 40,
+) -> Path:
     model_key = model_key_from_mesh_path(mesh_path, render_root)
     preview_dir = approvals_root / "previews" / slugify(model_key)
     preview_dir.mkdir(parents=True, exist_ok=True)
@@ -426,20 +487,30 @@ def render_review_pack(mesh_path: Path, render_root: Path, approvals_root: Path,
     for old_file in preview_dir.glob("review_*.png"):
         old_file.unlink(missing_ok=True)
 
-    scene, mesh_center, mesh_extents, base_radius, camera_yfov = build_scene(mesh_path)
-    camera = pyrender.PerspectiveCamera(yfov=camera_yfov)
-    renderer = pyrender.OffscreenRenderer(viewport_width=preview_size, viewport_height=preview_size)
+    scene: pyrender.Scene | None = None
+    camera = None
+    renderer: pyrender.OffscreenRenderer | None = None
+    camera_node: pyrender.Node | None = None
+    dir_node: pyrender.Node | None = None
+    fill_node: pyrender.Node | None = None
 
     rendered: list[Path] = []
     try:
+        scene, mesh_center, mesh_extents, base_radius, camera_yfov = build_scene(mesh_path)
+        camera = pyrender.PerspectiveCamera(yfov=camera_yfov)
+        renderer = pyrender.OffscreenRenderer(viewport_width=preview_size, viewport_height=preview_size)
+        camera_node = scene.add(camera, pose=np.eye(4))
+
         for index, (label, azimuth_deg, elevation_deg, roll_deg) in enumerate(REVIEW_VIEW_SPECS):
             sky, light = select_environment_variant(index)
-            light_nodes = apply_environment_lighting(
+            dir_node, fill_node = apply_environment_lighting(
                 scene=scene,
                 mesh_center=mesh_center,
                 base_radius=base_radius,
                 sky=sky,
                 light=light,
+                dir_node=dir_node,
+                fill_node=fill_node,
             )
             cam_pose = compute_camera_pose(
                 mesh_center=mesh_center,
@@ -450,17 +521,26 @@ def render_review_pack(mesh_path: Path, render_root: Path, approvals_root: Path,
                 roll_deg=roll_deg,
                 phase=None,
             )
-            cam_node = scene.add(camera, pose=cam_pose)
+            scene.set_pose(camera_node, pose=cam_pose)
             color, _ = renderer.render(scene)
-            scene.remove_node(cam_node)
-            for node in light_nodes:
-                scene.remove_node(node)
 
             out_file = preview_dir / f"review_{index:02d}_{label}_{sky['name']}_{light['name']}.png"
-            Image.fromarray(color).save(out_file)
+            save_png_array(color, out_file)
             rendered.append(out_file)
+            del color
+            if gc_every_frames > 0 and (index + 1) % gc_every_frames == 0:
+                gc.collect()
     finally:
-        renderer.delete()
+        safe_remove_node(scene, camera_node)
+        safe_remove_node(scene, dir_node)
+        safe_remove_node(scene, fill_node)
+        if renderer is not None:
+            renderer.delete()
+            del renderer
+        release_scene(scene)
+        del scene
+        del camera
+        gc.collect()
 
     sheet_path = preview_dir / "review_sheet.png"
     save_review_sheet(rendered, sheet_path)
@@ -495,6 +575,8 @@ def check_or_update_approval(
     approval_mode: str,
     force_review: bool,
     auto_approve: bool,
+    preview_size: int,
+    gc_every_frames: int,
 ) -> tuple[str, Path | None]:
     model_key = model_key_from_mesh_path(mesh_path, render_root)
     record_path = approval_record_path(approvals_root, model_key)
@@ -514,7 +596,13 @@ def check_or_update_approval(
     if approval_mode == "check":
         return "pending", Path(record["preview_sheet"]) if record.get("preview_sheet") else None
 
-    sheet_path = render_review_pack(mesh_path, render_root, approvals_root)
+    sheet_path = render_review_pack(
+        mesh_path,
+        render_root,
+        approvals_root,
+        preview_size=preview_size,
+        gc_every_frames=gc_every_frames,
+    )
     if auto_approve:
         status, note = "approved", "Auto-approved by CLI flag."
     else:
@@ -602,12 +690,12 @@ def render_one_mesh(
     render_config: RenderConfig,
     clean_output: bool,
 ) -> int:
-    scene, mesh_center, mesh_extents, base_radius, camera_yfov = build_scene(mesh_path)
-    camera = pyrender.PerspectiveCamera(yfov=camera_yfov)
-    renderer = pyrender.OffscreenRenderer(
-        viewport_width=render_config.render_size,
-        viewport_height=render_config.render_size,
-    )
+    scene: pyrender.Scene | None = None
+    camera = None
+    renderer: pyrender.OffscreenRenderer | None = None
+    camera_node: pyrender.Node | None = None
+    dir_node: pyrender.Node | None = None
+    fill_node: pyrender.Node | None = None
 
     output_dir = resolve_output_dir(mesh_path, render_root, images_root, images_index)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -625,17 +713,27 @@ def render_one_mesh(
 
     frame_idx = 0
     try:
+        scene, mesh_center, mesh_extents, base_radius, camera_yfov = build_scene(mesh_path)
+        camera = pyrender.PerspectiveCamera(yfov=camera_yfov)
+        renderer = pyrender.OffscreenRenderer(
+            viewport_width=render_config.render_size,
+            viewport_height=render_config.render_size,
+        )
+        camera_node = scene.add(camera, pose=np.eye(4))
+
         for orientation_name, roll_deg in render_config.orientation_modes:
             for azimuth_deg in range(0, 360, render_config.azimuth_step_deg):
                 for elevation_deg in elevation_degs:
                     phase = (2.0 * math.pi * frame_idx) / max(total_frames - 1, 1)
                     sky, light = select_environment_variant(frame_idx)
-                    light_nodes = apply_environment_lighting(
+                    dir_node, fill_node = apply_environment_lighting(
                         scene=scene,
                         mesh_center=mesh_center,
                         base_radius=base_radius,
                         sky=sky,
                         light=light,
+                        dir_node=dir_node,
+                        fill_node=fill_node,
                     )
                     cam_pose = compute_camera_pose(
                         mesh_center=mesh_center,
@@ -647,21 +745,30 @@ def render_one_mesh(
                         phase=phase,
                     )
 
-                    cam_node = scene.add(camera, pose=cam_pose)
+                    scene.set_pose(camera_node, pose=cam_pose)
                     color, _ = renderer.render(scene)
-                    scene.remove_node(cam_node)
-                    for node in light_nodes:
-                        scene.remove_node(node)
 
                     filename = (
                         f"{prefix}{orientation_name}_"
                         f"{sky['name']}_{light['name']}_"
                         f"az{azimuth_deg:03d}_el{elevation_deg:+03d}_{frame_idx:05d}.png"
                     )
-                    Image.fromarray(color).save(output_dir / filename)
+                    save_png_array(color, output_dir / filename)
+                    del color
                     frame_idx += 1
+                    if render_config.gc_every_frames > 0 and frame_idx % render_config.gc_every_frames == 0:
+                        gc.collect()
     finally:
-        renderer.delete()
+        safe_remove_node(scene, camera_node)
+        safe_remove_node(scene, dir_node)
+        safe_remove_node(scene, fill_node)
+        if renderer is not None:
+            renderer.delete()
+            del renderer
+        release_scene(scene)
+        del scene
+        del camera
+        gc.collect()
 
     manifest_path = output_dir / f"{safe_stem}_render_manifest.json"
     write_render_manifest(
@@ -693,6 +800,12 @@ def parse_args() -> argparse.Namespace:
         help="Folder where approval records and review sheets are stored.",
     )
     parser.add_argument("--render-size", type=int, default=896, help="PNG side length in pixels.")
+    parser.add_argument(
+        "--preview-size",
+        type=int,
+        default=512,
+        help="Preview render side length for manual approval sheets.",
+    )
     parser.add_argument("--azimuth-step", type=int, default=20, help="Azimuth angle step in degrees.")
     parser.add_argument("--elevation-min", type=int, default=-30, help="Minimum elevation in degrees.")
     parser.add_argument("--elevation-max", type=int, default=30, help="Maximum elevation in degrees.")
@@ -716,6 +829,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--clean-output", action="store_true", help="Delete previous renders for each mesh before writing.")
     parser.add_argument("--limit-models", type=int, default=0, help="Process only the first N meshes (0 means all).")
+    parser.add_argument(
+        "--gc-every-frames",
+        type=int,
+        default=40,
+        help="Run Python garbage collection every N rendered frames (0 disables periodic GC).",
+    )
     return parser.parse_args()
 
 
@@ -739,6 +858,10 @@ def main() -> None:
 
     if args.limit_models > 0:
         mesh_paths = mesh_paths[: args.limit_models]
+    if args.preview_size < 64:
+        raise ValueError("--preview-size must be >= 64")
+    if args.gc_every_frames < 0:
+        raise ValueError("--gc-every-frames must be >= 0")
 
     if args.auto_approve_all_first and args.approval_mode != "off":
         newly_approved, already_approved = bulk_auto_approve(
@@ -759,6 +882,7 @@ def main() -> None:
         elevation_min_deg=args.elevation_min,
         elevation_max_deg=args.elevation_max,
         elevation_step_deg=args.elevation_step,
+        gc_every_frames=args.gc_every_frames,
     )
     images_index = build_existing_images_index(images_root)
 
@@ -776,6 +900,8 @@ def main() -> None:
                 approval_mode=args.approval_mode,
                 force_review=args.force_review,
                 auto_approve=args.auto_approve,
+                preview_size=args.preview_size,
+                gc_every_frames=args.gc_every_frames,
             )
 
             if args.approval_mode == "only":

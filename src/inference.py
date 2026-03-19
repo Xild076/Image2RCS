@@ -23,10 +23,21 @@ def load_checkpoint(checkpoint_path: str, device: torch.device):
 
 
 class InferenceImageDataset(Dataset):
-    def __init__(self, image_paths: list[Path], transform, cache_mode: str, cache_dir: str):
+    def __init__(
+        self,
+        image_paths: list[Path],
+        transform,
+        cache_mode: str,
+        cache_dir: str,
+        memory_cache_items: int,
+    ):
         self.image_paths = image_paths
         self.transform = transform
-        self.cache = ImageTensorCache(mode=cache_mode, cache_dir=cache_dir)
+        self.cache = ImageTensorCache(
+            mode=cache_mode,
+            cache_dir=cache_dir,
+            max_memory_items=memory_cache_items,
+        )
 
     def __len__(self) -> int:
         return len(self.image_paths)
@@ -48,6 +59,7 @@ def predict_images(
     num_workers: str | int,
     cache_mode: str,
     cache_dir: str,
+    memory_cache_items: int,
     profile: bool,
 ):
     dataset = InferenceImageDataset(
@@ -55,6 +67,7 @@ def predict_images(
         transform=transform,
         cache_mode=cache_mode,
         cache_dir=cache_dir,
+        memory_cache_items=memory_cache_items,
     )
 
     pin_memory = device.type == "cuda"
@@ -70,14 +83,19 @@ def predict_images(
     else:
         resolved_num_workers = int(parsed_num_workers)
 
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=resolved_num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=resolved_num_workers > 0,
-    )
+    loader_kwargs = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": resolved_num_workers,
+        "pin_memory": pin_memory,
+        # One inference pass does not benefit from persistent workers and keeps RSS lower.
+        "persistent_workers": False,
+    }
+    if resolved_num_workers > 0:
+        # Reduce prefetched batches in worker queues to keep RAM usage down.
+        loader_kwargs["prefetch_factor"] = 1
+    loader = DataLoader(**loader_kwargs)
 
     predictions: list[tuple[str, float]] = []
     data_load_time = 0.0
@@ -133,12 +151,20 @@ def main():
     parser.add_argument("--num-workers", type=str, default="auto", help='DataLoader workers, integer or "auto"')
     parser.add_argument("--cache-mode", type=str, default="disk", choices=["off", "memory", "disk"])
     parser.add_argument("--cache-dir", type=str, default=".cache/image2rcs")
+    parser.add_argument(
+        "--memory-cache-items",
+        type=int,
+        default=256,
+        help="Max decoded images kept in RAM when --cache-mode=memory.",
+    )
     parser.add_argument("--cpu-threads", type=int, default=0, help="Set torch CPU threads; 0 keeps runtime default")
     parser.add_argument("--profile", action="store_true", help="Print timing and throughput")
     args = parser.parse_args()
 
     if args.batch_size < 1:
         raise ValueError("--batch-size must be >= 1")
+    if args.memory_cache_items < 1:
+        raise ValueError("--memory-cache-items must be >= 1")
     configure_cpu_threads(args.cpu_threads if args.cpu_threads > 0 else None)
 
     device = torch.device(args.device)
@@ -160,6 +186,7 @@ def main():
         num_workers=args.num_workers,
         cache_mode=args.cache_mode,
         cache_dir=args.cache_dir,
+        memory_cache_items=args.memory_cache_items,
         profile=args.profile,
     )
     elapsed = time.perf_counter() - start

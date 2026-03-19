@@ -48,7 +48,10 @@ Useful options:
 
 - `--num-workers auto|N`: auto-tune DataLoader workers over `{0,1,2,4}`
 - `--cache-mode off|memory|disk`: image decode cache strategy (`disk` is fastest for repeat runs)
+- `--memory-cache-items N`: cap RAM usage when `--cache-mode memory` (default `256`)
 - `--cache-dir PATH`: cache directory for disk mode
+- `--persistent-workers`: keep workers across epochs (faster, higher RAM)
+- `--prefetch-factor N`: prefetched batches per worker (default `1`, lower RAM)
 - `--cpu-threads N`: set Torch CPU thread count
 - `--eval-every N`: run validation every N epochs
 - `--profile`: print per-epoch timing split (`data_load`, `fwd_bwd`, `eval`, `ckpt_io`)
@@ -84,6 +87,7 @@ Useful options:
 - `--batch-size N`: batched folder inference for much higher throughput
 - `--num-workers auto|N`: auto-tune inference DataLoader workers
 - `--cache-mode off|memory|disk`: image decode cache strategy
+- `--memory-cache-items N`: cap RAM usage when `--cache-mode memory` (default `256`)
 - `--cache-dir PATH`: cache directory for disk mode
 - `--cpu-threads N`: set Torch CPU thread count
 - `--profile`: print `images/sec` and timing split
@@ -117,8 +121,10 @@ Approval records and review sheets are written under `data/model_approvals`.
 Quality/detail controls:
 
 - `--render-size`: output image size (default `896`)
+- `--preview-size`: approval-sheet render size (default `512`)
 - `--azimuth-step`: smaller means more camera angles (default `20`)
 - `--elevation-min/--elevation-max/--elevation-step`: vertical angle sweep (default `-30..30` by `15`)
+- `--gc-every-frames`: periodic garbage collection cadence during render (default `40`)
 
 Lighting and sky variation:
 

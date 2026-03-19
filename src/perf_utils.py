@@ -65,15 +65,19 @@ def autotune_num_workers(
     timings: dict[int, float] = {}
     for num_workers in filtered:
         try:
-            persistent_workers = num_workers > 0
-            loader = DataLoader(
-                dataset,
-                batch_size=batch_size,
-                shuffle=shuffle,
-                num_workers=num_workers,
-                pin_memory=pin_memory,
-                persistent_workers=persistent_workers,
-            )
+            loader_kwargs = {
+                "dataset": dataset,
+                "batch_size": batch_size,
+                "shuffle": shuffle,
+                "num_workers": num_workers,
+                "pin_memory": pin_memory,
+                # Keep autotuning lightweight and avoid holding worker memory.
+                "persistent_workers": False,
+            }
+            if num_workers > 0:
+                loader_kwargs["prefetch_factor"] = 1
+
+            loader = DataLoader(**loader_kwargs)
 
             total_batches = min(max_batches, len(loader))
             if total_batches == 0:
@@ -95,6 +99,8 @@ def autotune_num_workers(
             shutdown = getattr(iterator, "_shutdown_workers", None)
             if callable(shutdown):
                 shutdown()
+            del iterator
+            del loader
         except Exception:
             timings[num_workers] = float("inf")
 

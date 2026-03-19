@@ -51,6 +51,27 @@ class TestDatasetCache(unittest.TestCase):
             self.assertFalse(torch.equal(first, third))
             self.assertGreaterEqual(len(list(cache_dir.glob("*.pt"))), 2)
 
+    def test_memory_cache_lru_eviction(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            image_a = tmp_path / "a.png"
+            image_b = tmp_path / "b.png"
+            image_c = tmp_path / "c.png"
+            self._write_image(image_a, (255, 0, 0))
+            self._write_image(image_b, (0, 255, 0))
+            self._write_image(image_c, (0, 0, 255))
+
+            cache = ImageTensorCache(mode="memory", max_memory_items=2)
+            cache.get(image_a)
+            cache.get(image_b)
+            self.assertEqual(cache.stats()["memory_entries"], 2)
+
+            # Accessing a third image should evict the least-recently used entry.
+            cache.get(image_c)
+            stats = cache.stats()
+            self.assertEqual(stats["memory_entries"], 2)
+            self.assertGreaterEqual(stats["evictions"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

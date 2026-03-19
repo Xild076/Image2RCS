@@ -76,6 +76,9 @@ def create_dataloaders(
     device: torch.device,
     cache_mode: str,
     cache_dir: str,
+    memory_cache_items: int,
+    persistent_workers: bool,
+    prefetch_factor: int,
     profile: bool,
 ):
     samples = load_image_samples(csv_path=csv_path, images_root=images_root)
@@ -87,6 +90,7 @@ def create_dataloaders(
         target_mode=target_mode,
         cache_mode=cache_mode,
         cache_dir=cache_dir,
+        memory_cache_items=memory_cache_items,
     )
     val_dataset = AircraftRCSDataset(
         samples=val_samples,
@@ -94,6 +98,7 @@ def create_dataloaders(
         target_mode=target_mode,
         cache_mode=cache_mode,
         cache_dir=cache_dir,
+        memory_cache_items=memory_cache_items,
     )
 
     pin_memory = device.type == "cuda"
@@ -109,23 +114,25 @@ def create_dataloaders(
     else:
         resolved_num_workers = int(parsed_num_workers)
 
-    persistent_workers = resolved_num_workers > 0
+    loader_common = {
+        "num_workers": resolved_num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": bool(persistent_workers and resolved_num_workers > 0),
+    }
+    if resolved_num_workers > 0:
+        loader_common["prefetch_factor"] = max(1, int(prefetch_factor))
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=resolved_num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=persistent_workers,
+        **loader_common,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=resolved_num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=persistent_workers,
+        **loader_common,
     )
 
     if profile:
@@ -294,6 +301,23 @@ def main():
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--cache-mode", type=str, default="disk", choices=["off", "memory", "disk"])
     parser.add_argument("--cache-dir", type=str, default=".cache/image2rcs")
+    parser.add_argument(
+        "--memory-cache-items",
+        type=int,
+        default=256,
+        help="Max decoded images kept in RAM when --cache-mode=memory.",
+    )
+    parser.add_argument(
+        "--persistent-workers",
+        action="store_true",
+        help="Keep DataLoader workers alive across epochs (higher speed, higher RAM).",
+    )
+    parser.add_argument(
+        "--prefetch-factor",
+        type=int,
+        default=1,
+        help="Prefetched batches per worker when num_workers > 0.",
+    )
     parser.add_argument("--cpu-threads", type=int, default=0, help="Set torch CPU threads; 0 keeps runtime default")
     parser.add_argument("--profile", action="store_true", help="Print timing breakdown per epoch")
     parser.add_argument("--eval-every", type=int, default=1, help="Run validation every N epochs")
@@ -318,6 +342,10 @@ def main():
         raise ValueError("--relative-beta must be > 0")
     if args.smoothl1_beta <= 0:
         raise ValueError("--smoothl1-beta must be > 0")
+    if args.memory_cache_items < 1:
+        raise ValueError("--memory-cache-items must be >= 1")
+    if args.prefetch_factor < 1:
+        raise ValueError("--prefetch-factor must be >= 1")
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -335,6 +363,9 @@ def main():
         device=device,
         cache_mode=args.cache_mode,
         cache_dir=args.cache_dir,
+        memory_cache_items=args.memory_cache_items,
+        persistent_workers=args.persistent_workers,
+        prefetch_factor=args.prefetch_factor,
         profile=args.profile,
     )
 
