@@ -1,5 +1,4 @@
 .cache/
-/data/images
 /data/model_approvals
 *__pycache__/
 *.pyc

@@ -1,0 +1,16 @@
+{
+  "azimuth_step_deg": 20,
+  "elevation_max_deg": 30,
+  "elevation_min_deg": -30,
+  "elevation_step_deg": 15,
+  "frame_count": 180,
+  "mesh_path": "/Users/harry/Documents/Image2RCS/data/renders/pilatus_pc-12_ngx/pilatus_pc-12_ngx.glb",
+  "orientation_modes": [
+    "upright",
+    "inverted"
+  ],
+  "output_dir": "/Users/harry/Documents/Image2RCS/data/images/pilatus_pc-12_ngx_images",
+  "removed_existing": 0,
+  "render_size": 896,
+  "updated_at": "2026-03-19T15:36:22+00:00"
+}

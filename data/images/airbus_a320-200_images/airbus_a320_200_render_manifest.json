@@ -1,0 +1,16 @@
+{
+  "azimuth_step_deg": 20,
+  "elevation_max_deg": 30,
+  "elevation_min_deg": -30,
+  "elevation_step_deg": 15,
+  "frame_count": 180,
+  "mesh_path": "/Users/harry/Documents/Image2RCS/data/renders/airbus_a320-200/airbus_a320-200.glb",
+  "orientation_modes": [
+    "upright",
+    "inverted"
+  ],
+  "output_dir": "/Users/harry/Documents/Image2RCS/data/images/airbus_a320-200_images",
+  "removed_existing": 0,
+  "render_size": 896,
+  "updated_at": "2026-03-19T15:32:45+00:00"
+}
