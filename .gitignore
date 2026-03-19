@@ -5,4 +5,4 @@
 *.pyc
 /checkpoints/*
 !/checkpoints/best_model.pt
-.DS_Store
+*.DS_Store
