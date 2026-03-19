@@ -1,0 +1,8 @@
+.cache/
+/data/images
+/data/model_approvals
+*__pycache__/
+*.pyc
+/checkpoints/*
+!/checkpoints/best_model.pt
+.DS_Store

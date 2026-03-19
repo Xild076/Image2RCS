@@ -1,0 +1,49 @@
+aircraft_name,aircraft_type,rcs,image_folder
+Cessna 172 Skyhawk,light_prop_aircraft,1.0,cessna_172_skyhawk_images
+Piper PA-28 Cherokee,light_prop_aircraft,1.0,piper_pa-28_cherokee_images
+Cirrus SR22,light_prop_aircraft,1.0,cirrus_sr22_images
+Diamond DA40,light_prop_aircraft,0.8,diamond_da40_images
+Pilatus PC-12 NGX,light_prop_aircraft,1.5,pilatus_pc-12_ngx_images
+
+Learjet 75 Liberty,light_business_jet,2.0,learjet_75_liberty_images
+HondaJet HA-420,light_business_jet,1.8,hondajet_ha-420_images
+
+Mikoyan-Gurevich MiG-21bis,small_fighter,3.0,mig-21bis_images
+Saab JAS 39C Gripen,small_fighter,2.0,saab_jas_39c_gripen_images
+
+McDonnell Douglas F-4E Phantom II,legacy_fighter,6.0,f-4e_phantom_ii_images
+Mikoyan MiG-23MLD,legacy_fighter,6.0,mig-23mld_images
+Mikoyan MiG-29A Fulcrum,legacy_fighter,5.0,mig-29a_fulcrum_images
+Sukhoi Su-27S Flanker,legacy_fighter,10.0,su-27s_flanker_images
+
+Airbus A320-200,small_airliner,15.0,airbus_a320-200_images
+
+Boeing 757-200,medium_airliner,40.0,boeing_757-200_images
+Boeing 767-300ER,medium_airliner,50.0,boeing_767-300er_images
+Airbus A330-300,medium_airliner,60.0,airbus_a330-300_images
+Boeing 787-9,medium_airliner,40.0,boeing_787-9_images
+Airbus A350-900,medium_airliner,45.0,airbus_a350-900_images
+Boeing 777-300ER,medium_airliner,70.0,boeing_777-300er_images
+
+Boeing 747-400,jumbo_jet,100.0,boeing_747-400_images
+Airbus A380-800,jumbo_jet,100.0,airbus_a380-800_images
+
+Lockheed Martin F-22A Raptor,stealth_fighter,0.0001,f-22a_raptor_images
+Lockheed Martin F-35A Lightning II,stealth_fighter,0.005,f-35a_lightning_ii_images
+Lockheed F-117A Nighthawk,stealth_attack_aircraft,0.003,f-117a_nighthawk_images
+Chengdu J-20A Mighty Dragon,stealth_fighter,0.05,j-20a_mighty_dragon_images
+Shenyang FC-31 Gyrfalcon,stealth_fighter,0.05,shenyang_fc-31_gyrfalcon_images
+Sukhoi Su-57 Felon,stealth_fighter,0.1,sukhoi_su-57_felon_images
+
+McDonnell Douglas F-15C Eagle,air_superiority_fighter,25.0,f-15c_eagle_images
+Lockheed Martin F-16C Fighting Falcon,multirole_fighter,5.0,f-16c_fighting_falcon_images
+McDonnell Douglas F/A-18C Hornet,carrier_fighter,1.0,f-a-18c_hornet_images
+Eurofighter Typhoon Tranche 3,multirole_fighter,0.5,eurofighter_typhoon_tranche_3_images
+Sukhoi Su-30SM,multirole_fighter,12.0,sukhoi_su-30sm_images
+Sukhoi Su-35S Flanker-E,multirole_fighter,1.0,su-35s_flanker-e_images
+
+Northrop Grumman B-2A Spirit,stealth_bomber,0.01,b-2a_spirit_images
+Tupolev Tu-95MS Bear,bomber,100.0,tu-95ms_bear_images
+Tupolev Tu-160 Blackjack,bomber,20.0,tu-160_blackjack_images
+
+Lockheed SR-71A Blackbird,reconnaissance_aircraft,0.01,sr-71a_blackbird_images
