@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import math
 import re
@@ -13,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pyrender
 import trimesh
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
 
 FIT_MARGIN = 1.08
@@ -44,6 +45,41 @@ SKY_PRESETS = (
         "dir_intensity": 1.8,
         "fill_intensity": 8.0,
     },
+    {
+        "name": "stormblue",
+        "bg_color": [0.32, 0.43, 0.59, 1.0],
+        "ambient": [0.23, 0.25, 0.30],
+        "dir_intensity": 2.0,
+        "fill_intensity": 8.6,
+    },
+    {
+        "name": "overcast",
+        "bg_color": [0.72, 0.77, 0.82, 1.0],
+        "ambient": [0.46, 0.46, 0.47],
+        "dir_intensity": 1.7,
+        "fill_intensity": 7.8,
+    },
+    {
+        "name": "mintsky",
+        "bg_color": [0.58, 0.86, 0.80, 1.0],
+        "ambient": [0.35, 0.39, 0.38],
+        "dir_intensity": 2.6,
+        "fill_intensity": 10.4,
+    },
+    {
+        "name": "sandhaze",
+        "bg_color": [0.90, 0.78, 0.60, 1.0],
+        "ambient": [0.38, 0.33, 0.28],
+        "dir_intensity": 2.4,
+        "fill_intensity": 9.8,
+    },
+    {
+        "name": "sunsetpink",
+        "bg_color": [0.94, 0.60, 0.66, 1.0],
+        "ambient": [0.36, 0.30, 0.31],
+        "dir_intensity": 2.3,
+        "fill_intensity": 9.2,
+    },
 )
 LIGHT_POSITION_PRESETS = (
     {
@@ -65,6 +101,42 @@ LIGHT_POSITION_PRESETS = (
         "name": "back_rim",
         "dir_offset": [0.0, 1.8, 1.4],
         "fill_offset": [0.0, 1.0, 1.0],
+    },
+    {
+        "name": "top_down",
+        "dir_offset": [0.0, 0.0, 2.4],
+        "fill_offset": [0.0, -0.7, 0.8],
+    },
+    {
+        "name": "diag_front",
+        "dir_offset": [1.2, -1.7, 1.3],
+        "fill_offset": [0.8, -1.0, 0.9],
+    },
+)
+LIGHT_STYLE_PRESETS = (
+    {
+        "name": "soft",
+        "ambient_scale": 1.22,
+        "dir_scale": 0.68,
+        "fill_scale": 0.76,
+    },
+    {
+        "name": "neutral",
+        "ambient_scale": 1.0,
+        "dir_scale": 1.0,
+        "fill_scale": 1.0,
+    },
+    {
+        "name": "harsh",
+        "ambient_scale": 0.72,
+        "dir_scale": 1.62,
+        "fill_scale": 0.64,
+    },
+    {
+        "name": "bright",
+        "ambient_scale": 1.10,
+        "dir_scale": 1.36,
+        "fill_scale": 1.24,
     },
 )
 REVIEW_VIEW_SPECS = (
@@ -94,6 +166,16 @@ class RenderConfig:
     extent_margin: float = EXTENT_MARGIN
     gc_every_frames: int = 40
     orientation_modes: tuple[tuple[str, float], ...] = DEFAULT_ORIENTATION_MODES
+    distance_min_scale: float = 0.78
+    distance_max_scale: float = 1.45
+    offcenter_xy_scale: float = 0.34
+    offcenter_z_scale: float = 0.20
+    center_hold_probability: float = 0.22
+    cloud_probability: float = 0.55
+    cloud_max_layers: int = 3
+    frame_seed: int = 23
+    output_format: str = "webp"
+    output_quality: int = 78
 
     @property
     def elevation_degs(self) -> list[int]:
@@ -182,8 +264,11 @@ def resolve_output_dir(
 
 
 def clear_existing_renders(output_dir: Path, prefix: str) -> int:
+    valid_exts = {".png", ".jpg", ".jpeg", ".webp"}
     removed = 0
-    for image_file in output_dir.glob(f"{prefix}*.png"):
+    for image_file in output_dir.glob(f"{prefix}*"):
+        if image_file.suffix.lower() not in valid_exts:
+            continue
         image_file.unlink(missing_ok=True)
         removed += 1
     return removed
@@ -241,7 +326,9 @@ def to_untextured_meshes(meshes: list) -> list:
     return sanitized
 
 
-def build_pyrender_mesh(mesh_path: Path, meshes: list) -> pyrender.Mesh:
+def build_pyrender_mesh(mesh_path: Path, meshes: list, force_untextured: bool = False) -> pyrender.Mesh:
+    if force_untextured:
+        return pyrender.Mesh.from_trimesh(to_untextured_meshes(meshes), smooth=False)
     try:
         return pyrender.Mesh.from_trimesh(meshes)
     except (TypeError, ValueError) as exc:
@@ -305,6 +392,150 @@ def save_png_array(color_buffer: np.ndarray, output_path: Path) -> None:
         image.close()
 
 
+def normalize_output_format(value: str) -> str:
+    token = value.strip().lower()
+    if token == "jpg":
+        token = "jpeg"
+    if token not in {"png", "jpeg", "webp"}:
+        raise ValueError(f"Unsupported output format: {value}. Expected png, jpeg, or webp.")
+    return token
+
+
+def output_extension(output_format: str) -> str:
+    return {
+        "png": ".png",
+        "jpeg": ".jpg",
+        "webp": ".webp",
+    }[normalize_output_format(output_format)]
+
+
+def save_render_array(color_buffer: np.ndarray, output_path: Path, output_format: str, output_quality: int) -> None:
+    image = Image.fromarray(color_buffer)
+    fmt = normalize_output_format(output_format)
+
+    rgb_image: Image.Image | None = None
+    try:
+        if fmt == "png":
+            image.save(output_path, format="PNG", optimize=True, compress_level=9)
+            return
+
+        rgb_image = image.convert("RGB")
+        if fmt == "jpeg":
+            rgb_image.save(
+                output_path,
+                format="JPEG",
+                quality=int(output_quality),
+                optimize=True,
+                progressive=True,
+            )
+            return
+
+        rgb_image.save(
+            output_path,
+            format="WEBP",
+            quality=int(output_quality),
+            method=6,
+        )
+    finally:
+        if rgb_image is not None:
+            rgb_image.close()
+        image.close()
+
+
+def stable_seed(text: str, base_seed: int) -> int:
+    digest = hashlib.blake2b(f"{base_seed}:{text}".encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=False)
+
+
+def frame_rng(model_seed: int, frame_index: int) -> np.random.Generator:
+    frame_seed = (model_seed + ((frame_index + 1) * 0x9E3779B97F4A7C15)) & 0xFFFFFFFFFFFFFFFF
+    return np.random.default_rng(frame_seed)
+
+
+def sample_frame_variant(
+    rng: np.random.Generator,
+    mesh_extents: np.ndarray,
+    render_config: RenderConfig,
+) -> tuple[float, np.ndarray, dict]:
+    distance_scale = float(rng.uniform(render_config.distance_min_scale, render_config.distance_max_scale))
+    light_style = LIGHT_STYLE_PRESETS[int(rng.integers(0, len(LIGHT_STYLE_PRESETS)))]
+
+    if rng.random() < render_config.center_hold_probability:
+        return distance_scale, np.zeros(3, dtype=np.float64), light_style
+
+    xy_raw = rng.uniform(-1.0, 1.0, size=2)
+    xy_norm = float(np.linalg.norm(xy_raw))
+    min_norm = 0.22
+    if xy_norm < min_norm and render_config.offcenter_xy_scale > 1e-6:
+        scale = min_norm / max(xy_norm, 1e-6)
+        xy_raw *= scale
+
+    xy_bias = np.clip(xy_raw, -1.0, 1.0) * render_config.offcenter_xy_scale
+    z_bias = float(rng.uniform(-render_config.offcenter_z_scale, render_config.offcenter_z_scale))
+    target_bias = np.array(
+        [
+            xy_bias[0] * mesh_extents[0],
+            xy_bias[1] * mesh_extents[1],
+            z_bias * mesh_extents[2],
+        ],
+        dtype=np.float64,
+    )
+    return distance_scale, target_bias, light_style
+
+
+def maybe_apply_fake_clouds(
+    color_buffer: np.ndarray,
+    rng: np.random.Generator,
+    cloud_probability: float,
+    cloud_max_layers: int,
+) -> np.ndarray:
+    if cloud_probability <= 0.0 or cloud_max_layers <= 0:
+        return color_buffer
+    if float(rng.random()) > cloud_probability:
+        return color_buffer
+
+    base = Image.fromarray(color_buffer).convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    width, height = base.size
+
+    try:
+        layer_count = int(rng.integers(1, cloud_max_layers + 1))
+        for _ in range(layer_count):
+            layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(layer, "RGBA")
+            puff_count = int(rng.integers(2, 7))
+            for _ in range(puff_count):
+                cloud_w = int(rng.uniform(0.12, 0.45) * width)
+                cloud_h = int(rng.uniform(0.06, 0.24) * height)
+                x0 = int(rng.uniform(-0.2, 1.0) * width)
+                y0 = int(rng.uniform(-0.2, 0.85) * height)
+                x1 = x0 + max(cloud_w, 8)
+                y1 = y0 + max(cloud_h, 6)
+                tint = int(rng.integers(224, 256))
+                alpha = int(rng.integers(22, 76))
+                draw.ellipse((x0, y0, x1, y1), fill=(tint, tint, tint, alpha))
+
+            blur_radius = float(rng.uniform(8.0, 28.0))
+            blurred = layer.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+            overlay = Image.alpha_composite(overlay, blurred)
+            layer.close()
+            blurred.close()
+
+        haze_alpha = int(rng.integers(0, 28))
+        if haze_alpha > 0:
+            haze = Image.new("RGBA", base.size, (255, 255, 255, haze_alpha))
+            overlay = Image.alpha_composite(overlay, haze)
+            haze.close()
+
+        merged = Image.alpha_composite(base, overlay).convert("RGB")
+        output = np.array(merged, dtype=np.uint8)
+        merged.close()
+        return output
+    finally:
+        overlay.close()
+        base.close()
+
+
 def release_scene(scene: pyrender.Scene | None) -> None:
     if scene is None:
         return
@@ -324,14 +555,14 @@ def safe_remove_node(scene: pyrender.Scene | None, node: pyrender.Node | None) -
         pass
 
 
-def build_scene(mesh_path: Path):
+def build_scene(mesh_path: Path, force_untextured: bool = False):
     check_missing_textures(mesh_path)
     loaded = load_mesh_asset(mesh_path)
     renderable = to_renderable_meshes(loaded)
     mesh_center, mesh_extents, mesh_diagonal = compute_bounds(renderable)
 
     scene = pyrender.Scene(bg_color=SKY_PRESETS[0]["bg_color"], ambient_light=SKY_PRESETS[0]["ambient"])
-    scene.add(build_pyrender_mesh(mesh_path, renderable))
+    scene.add(build_pyrender_mesh(mesh_path, renderable, force_untextured=force_untextured))
 
     del renderable
     del loaded
@@ -344,6 +575,11 @@ def build_scene(mesh_path: Path):
     return scene, mesh_center, mesh_extents, base_radius, camera_yfov
 
 
+def is_ctypes_array_handler_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "no array-type handler" in msg and "_ctypes.type" in msg
+
+
 def compute_camera_pose(
     mesh_center: np.ndarray,
     mesh_extents: np.ndarray,
@@ -352,6 +588,8 @@ def compute_camera_pose(
     elevation_deg: int,
     roll_deg: float,
     phase: float | None,
+    distance_scale: float = 1.0,
+    target_bias: np.ndarray | None = None,
 ):
     azimuth = math.radians(azimuth_deg)
     elevation = math.radians(elevation_deg)
@@ -369,6 +607,10 @@ def compute_camera_pose(
         )
         dynamic_target = mesh_center + target_offset
         dynamic_radius = base_radius * (1.0 + 0.06 * math.sin(1.17 * phase))
+
+    if target_bias is not None:
+        dynamic_target = dynamic_target + target_bias
+    dynamic_radius = max(base_radius * 0.55, dynamic_radius * max(distance_scale, 0.35))
 
     x = dynamic_radius * math.cos(elevation) * math.cos(azimuth)
     y = dynamic_radius * math.cos(elevation) * math.sin(azimuth)
@@ -390,11 +632,18 @@ def apply_environment_lighting(
     base_radius: float,
     sky: dict,
     light: dict,
+    light_style: dict | None = None,
     dir_node: pyrender.Node | None = None,
     fill_node: pyrender.Node | None = None,
 ) -> tuple[pyrender.Node, pyrender.Node]:
     scene.bg_color = sky["bg_color"]
-    scene.ambient_light = sky["ambient"]
+
+    ambient_scale = float(light_style["ambient_scale"]) if light_style is not None else 1.0
+    dir_scale = float(light_style["dir_scale"]) if light_style is not None else 1.0
+    fill_scale = float(light_style["fill_scale"]) if light_style is not None else 1.0
+
+    ambient = np.clip(np.array(sky["ambient"], dtype=np.float64) * ambient_scale, 0.0, 1.0)
+    scene.ambient_light = ambient.tolist()
 
     dir_offset = np.array(light["dir_offset"], dtype=np.float64) * base_radius
     fill_offset = np.array(light["fill_offset"], dtype=np.float64) * base_radius
@@ -407,25 +656,25 @@ def apply_environment_lighting(
 
     if dir_node is None:
         dir_node = scene.add(
-            pyrender.DirectionalLight(color=np.ones(3), intensity=float(sky["dir_intensity"])),
+            pyrender.DirectionalLight(color=np.ones(3), intensity=float(sky["dir_intensity"]) * dir_scale),
             pose=dir_pose,
         )
     else:
         scene.set_pose(dir_node, pose=dir_pose)
         dir_light = dir_node.light
         if isinstance(dir_light, pyrender.DirectionalLight):
-            dir_light.intensity = float(sky["dir_intensity"])
+            dir_light.intensity = float(sky["dir_intensity"]) * dir_scale
 
     if fill_node is None:
         fill_node = scene.add(
-            pyrender.PointLight(color=np.ones(3), intensity=float(sky["fill_intensity"])),
+            pyrender.PointLight(color=np.ones(3), intensity=float(sky["fill_intensity"]) * fill_scale),
             pose=fill_pose,
         )
     else:
         scene.set_pose(fill_node, pose=fill_pose)
         fill_light = fill_node.light
         if isinstance(fill_light, pyrender.PointLight):
-            fill_light.intensity = float(sky["fill_intensity"])
+            fill_light.intensity = float(sky["fill_intensity"]) * fill_scale
 
     return dir_node, fill_node
 
@@ -495,52 +744,65 @@ def render_review_pack(
     fill_node: pyrender.Node | None = None
 
     rendered: list[Path] = []
-    try:
-        scene, mesh_center, mesh_extents, base_radius, camera_yfov = build_scene(mesh_path)
-        camera = pyrender.PerspectiveCamera(yfov=camera_yfov)
-        renderer = pyrender.OffscreenRenderer(viewport_width=preview_size, viewport_height=preview_size)
-        camera_node = scene.add(camera, pose=np.eye(4))
-
-        for index, (label, azimuth_deg, elevation_deg, roll_deg) in enumerate(REVIEW_VIEW_SPECS):
-            sky, light = select_environment_variant(index)
-            dir_node, fill_node = apply_environment_lighting(
-                scene=scene,
-                mesh_center=mesh_center,
-                base_radius=base_radius,
-                sky=sky,
-                light=light,
-                dir_node=dir_node,
-                fill_node=fill_node,
+    for force_untextured in (False, True):
+        try:
+            scene, mesh_center, mesh_extents, base_radius, camera_yfov = build_scene(
+                mesh_path,
+                force_untextured=force_untextured,
             )
-            cam_pose = compute_camera_pose(
-                mesh_center=mesh_center,
-                mesh_extents=mesh_extents,
-                base_radius=base_radius,
-                azimuth_deg=azimuth_deg,
-                elevation_deg=elevation_deg,
-                roll_deg=roll_deg,
-                phase=None,
-            )
-            scene.set_pose(camera_node, pose=cam_pose)
-            color, _ = renderer.render(scene)
+            camera = pyrender.PerspectiveCamera(yfov=camera_yfov)
+            renderer = pyrender.OffscreenRenderer(viewport_width=preview_size, viewport_height=preview_size)
+            camera_node = scene.add(camera, pose=np.eye(4))
 
-            out_file = preview_dir / f"review_{index:02d}_{label}_{sky['name']}_{light['name']}.png"
-            save_png_array(color, out_file)
-            rendered.append(out_file)
-            del color
-            if gc_every_frames > 0 and (index + 1) % gc_every_frames == 0:
-                gc.collect()
-    finally:
-        safe_remove_node(scene, camera_node)
-        safe_remove_node(scene, dir_node)
-        safe_remove_node(scene, fill_node)
-        if renderer is not None:
-            renderer.delete()
-            del renderer
-        release_scene(scene)
-        del scene
-        del camera
-        gc.collect()
+            rendered.clear()
+            for index, (label, azimuth_deg, elevation_deg, roll_deg) in enumerate(REVIEW_VIEW_SPECS):
+                sky, light = select_environment_variant(index)
+                dir_node, fill_node = apply_environment_lighting(
+                    scene=scene,
+                    mesh_center=mesh_center,
+                    base_radius=base_radius,
+                    sky=sky,
+                    light=light,
+                    dir_node=dir_node,
+                    fill_node=fill_node,
+                )
+                cam_pose = compute_camera_pose(
+                    mesh_center=mesh_center,
+                    mesh_extents=mesh_extents,
+                    base_radius=base_radius,
+                    azimuth_deg=azimuth_deg,
+                    elevation_deg=elevation_deg,
+                    roll_deg=roll_deg,
+                    phase=None,
+                )
+                scene.set_pose(camera_node, pose=cam_pose)
+                color, _ = renderer.render(scene)
+
+                out_file = preview_dir / f"review_{index:02d}_{label}_{sky['name']}_{light['name']}.png"
+                save_png_array(color, out_file)
+                rendered.append(out_file)
+                del color
+                if gc_every_frames > 0 and (index + 1) % gc_every_frames == 0:
+                    gc.collect()
+            break
+        except Exception as exc:
+            if force_untextured or not is_ctypes_array_handler_error(exc):
+                raise
+            for file_path in rendered:
+                file_path.unlink(missing_ok=True)
+            rendered.clear()
+            print(f"[warn] {mesh_path.name}: texture/OpenGL path failed during preview; retrying without textures.")
+        finally:
+            safe_remove_node(scene, camera_node)
+            safe_remove_node(scene, dir_node)
+            safe_remove_node(scene, fill_node)
+            if renderer is not None:
+                renderer.delete()
+                del renderer
+            release_scene(scene)
+            del scene
+            del camera
+            gc.collect()
 
     sheet_path = preview_dir / "review_sheet.png"
     save_review_sheet(rendered, sheet_path)
@@ -677,6 +939,16 @@ def write_render_manifest(
         "elevation_max_deg": render_config.elevation_max_deg,
         "elevation_step_deg": render_config.elevation_step_deg,
         "orientation_modes": [mode for mode, _ in render_config.orientation_modes],
+        "distance_min_scale": render_config.distance_min_scale,
+        "distance_max_scale": render_config.distance_max_scale,
+        "offcenter_xy_scale": render_config.offcenter_xy_scale,
+        "offcenter_z_scale": render_config.offcenter_z_scale,
+        "center_hold_probability": render_config.center_hold_probability,
+        "cloud_probability": render_config.cloud_probability,
+        "cloud_max_layers": render_config.cloud_max_layers,
+        "frame_seed": render_config.frame_seed,
+        "output_format": render_config.output_format,
+        "output_quality": render_config.output_quality,
         "updated_at": utc_now_iso(),
     }
     write_json(manifest_path, payload)
@@ -690,19 +962,14 @@ def render_one_mesh(
     render_config: RenderConfig,
     clean_output: bool,
 ) -> int:
-    scene: pyrender.Scene | None = None
-    camera = None
-    renderer: pyrender.OffscreenRenderer | None = None
-    camera_node: pyrender.Node | None = None
-    dir_node: pyrender.Node | None = None
-    fill_node: pyrender.Node | None = None
-
     output_dir = resolve_output_dir(mesh_path, render_root, images_root, images_index)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     safe_stem = slugify(mesh_path.stem)
     prefix = f"render_{safe_stem}_"
     removed_existing = clear_existing_renders(output_dir, prefix) if clean_output else 0
+    extension = output_extension(render_config.output_format)
+    model_seed = stable_seed(mesh_signature(mesh_path), render_config.frame_seed)
 
     elevation_degs = render_config.elevation_degs
     total_frames = (
@@ -712,63 +979,107 @@ def render_one_mesh(
     )
 
     frame_idx = 0
-    try:
-        scene, mesh_center, mesh_extents, base_radius, camera_yfov = build_scene(mesh_path)
-        camera = pyrender.PerspectiveCamera(yfov=camera_yfov)
-        renderer = pyrender.OffscreenRenderer(
-            viewport_width=render_config.render_size,
-            viewport_height=render_config.render_size,
-        )
-        camera_node = scene.add(camera, pose=np.eye(4))
+    generated_paths: list[Path] = []
+    for force_untextured in (False, True):
+        scene: pyrender.Scene | None = None
+        camera = None
+        renderer: pyrender.OffscreenRenderer | None = None
+        camera_node: pyrender.Node | None = None
+        dir_node: pyrender.Node | None = None
+        fill_node: pyrender.Node | None = None
 
-        for orientation_name, roll_deg in render_config.orientation_modes:
-            for azimuth_deg in range(0, 360, render_config.azimuth_step_deg):
-                for elevation_deg in elevation_degs:
-                    phase = (2.0 * math.pi * frame_idx) / max(total_frames - 1, 1)
-                    sky, light = select_environment_variant(frame_idx)
-                    dir_node, fill_node = apply_environment_lighting(
-                        scene=scene,
-                        mesh_center=mesh_center,
-                        base_radius=base_radius,
-                        sky=sky,
-                        light=light,
-                        dir_node=dir_node,
-                        fill_node=fill_node,
-                    )
-                    cam_pose = compute_camera_pose(
-                        mesh_center=mesh_center,
-                        mesh_extents=mesh_extents,
-                        base_radius=base_radius,
-                        azimuth_deg=azimuth_deg,
-                        elevation_deg=elevation_deg,
-                        roll_deg=roll_deg,
-                        phase=phase,
-                    )
+        frame_idx = 0
+        generated_paths.clear()
+        try:
+            scene, mesh_center, mesh_extents, base_radius, camera_yfov = build_scene(
+                mesh_path,
+                force_untextured=force_untextured,
+            )
+            camera = pyrender.PerspectiveCamera(yfov=camera_yfov)
+            renderer = pyrender.OffscreenRenderer(
+                viewport_width=render_config.render_size,
+                viewport_height=render_config.render_size,
+            )
+            camera_node = scene.add(camera, pose=np.eye(4))
 
-                    scene.set_pose(camera_node, pose=cam_pose)
-                    color, _ = renderer.render(scene)
+            for orientation_name, roll_deg in render_config.orientation_modes:
+                for azimuth_deg in range(0, 360, render_config.azimuth_step_deg):
+                    for elevation_deg in elevation_degs:
+                        rng = frame_rng(model_seed=model_seed, frame_index=frame_idx)
+                        phase = (2.0 * math.pi * frame_idx) / max(total_frames - 1, 1)
+                        sky, light = select_environment_variant(frame_idx)
+                        distance_scale, target_bias, light_style = sample_frame_variant(
+                            rng=rng,
+                            mesh_extents=mesh_extents,
+                            render_config=render_config,
+                        )
+                        dir_node, fill_node = apply_environment_lighting(
+                            scene=scene,
+                            mesh_center=mesh_center,
+                            base_radius=base_radius,
+                            sky=sky,
+                            light=light,
+                            light_style=light_style,
+                            dir_node=dir_node,
+                            fill_node=fill_node,
+                        )
+                        cam_pose = compute_camera_pose(
+                            mesh_center=mesh_center,
+                            mesh_extents=mesh_extents,
+                            base_radius=base_radius,
+                            azimuth_deg=azimuth_deg,
+                            elevation_deg=elevation_deg,
+                            roll_deg=roll_deg,
+                            phase=phase,
+                            distance_scale=distance_scale,
+                            target_bias=target_bias,
+                        )
 
-                    filename = (
-                        f"{prefix}{orientation_name}_"
-                        f"{sky['name']}_{light['name']}_"
-                        f"az{azimuth_deg:03d}_el{elevation_deg:+03d}_{frame_idx:05d}.png"
-                    )
-                    save_png_array(color, output_dir / filename)
-                    del color
-                    frame_idx += 1
-                    if render_config.gc_every_frames > 0 and frame_idx % render_config.gc_every_frames == 0:
-                        gc.collect()
-    finally:
-        safe_remove_node(scene, camera_node)
-        safe_remove_node(scene, dir_node)
-        safe_remove_node(scene, fill_node)
-        if renderer is not None:
-            renderer.delete()
-            del renderer
-        release_scene(scene)
-        del scene
-        del camera
-        gc.collect()
+                        scene.set_pose(camera_node, pose=cam_pose)
+                        color, _ = renderer.render(scene)
+                        color = maybe_apply_fake_clouds(
+                            color_buffer=color,
+                            rng=rng,
+                            cloud_probability=render_config.cloud_probability,
+                            cloud_max_layers=render_config.cloud_max_layers,
+                        )
+
+                        filename = (
+                            f"{prefix}{orientation_name}_"
+                            f"{sky['name']}_{light['name']}_{light_style['name']}_"
+                            f"az{azimuth_deg:03d}_el{elevation_deg:+03d}_{frame_idx:05d}{extension}"
+                        )
+                        out_path = output_dir / filename
+                        save_render_array(
+                            color_buffer=color,
+                            output_path=out_path,
+                            output_format=render_config.output_format,
+                            output_quality=render_config.output_quality,
+                        )
+                        generated_paths.append(out_path)
+                        del color
+                        frame_idx += 1
+                        if render_config.gc_every_frames > 0 and frame_idx % render_config.gc_every_frames == 0:
+                            gc.collect()
+            break
+        except Exception as exc:
+            if force_untextured or not is_ctypes_array_handler_error(exc):
+                raise
+            for file_path in generated_paths:
+                file_path.unlink(missing_ok=True)
+            generated_paths.clear()
+            print(f"[warn] {mesh_path.name}: texture/OpenGL path failed; retrying without textures.")
+        finally:
+            safe_remove_node(scene, camera_node)
+            safe_remove_node(scene, dir_node)
+            safe_remove_node(scene, fill_node)
+            if renderer is not None:
+                renderer.delete()
+                del renderer
+            release_scene(scene)
+            del scene
+            del camera
+            gc.collect()
 
     manifest_path = output_dir / f"{safe_stem}_render_manifest.json"
     write_render_manifest(
@@ -799,7 +1110,19 @@ def parse_args() -> argparse.Namespace:
         default="data/model_approvals",
         help="Folder where approval records and review sheets are stored.",
     )
-    parser.add_argument("--render-size", type=int, default=896, help="PNG side length in pixels.")
+    parser.add_argument("--render-size", type=int, default=640, help="Render side length in pixels.")
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        default="webp",
+        help="Image format for training renders: png|jpeg|jpg|webp.",
+    )
+    parser.add_argument(
+        "--output-quality",
+        type=int,
+        default=78,
+        help="Compression quality for jpeg/webp (1-100). Ignored for png.",
+    )
     parser.add_argument(
         "--preview-size",
         type=int,
@@ -830,6 +1153,54 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clean-output", action="store_true", help="Delete previous renders for each mesh before writing.")
     parser.add_argument("--limit-models", type=int, default=0, help="Process only the first N meshes (0 means all).")
     parser.add_argument(
+        "--distance-min-scale",
+        type=float,
+        default=0.78,
+        help="Minimum camera distance multiplier relative to base fit distance.",
+    )
+    parser.add_argument(
+        "--distance-max-scale",
+        type=float,
+        default=1.45,
+        help="Maximum camera distance multiplier relative to base fit distance.",
+    )
+    parser.add_argument(
+        "--offcenter-xy-scale",
+        type=float,
+        default=0.34,
+        help="Max horizontal/vertical framing offset as a fraction of mesh extents.",
+    )
+    parser.add_argument(
+        "--offcenter-z-scale",
+        type=float,
+        default=0.20,
+        help="Max depth-axis framing offset as a fraction of mesh extents.",
+    )
+    parser.add_argument(
+        "--center-hold-probability",
+        type=float,
+        default=0.22,
+        help="Chance that a frame keeps centered framing (0-1).",
+    )
+    parser.add_argument(
+        "--cloud-probability",
+        type=float,
+        default=0.55,
+        help="Chance to inject synthetic cloud noise into each frame (0-1).",
+    )
+    parser.add_argument(
+        "--cloud-max-layers",
+        type=int,
+        default=3,
+        help="Maximum fake cloud overlay layers per frame (0 disables clouds).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=23,
+        help="Base seed for deterministic random frame variations.",
+    )
+    parser.add_argument(
         "--gc-every-frames",
         type=int,
         default=40,
@@ -858,10 +1229,29 @@ def main() -> None:
 
     if args.limit_models > 0:
         mesh_paths = mesh_paths[: args.limit_models]
+    output_format = normalize_output_format(args.output_format)
+    if args.render_size < 64:
+        raise ValueError("--render-size must be >= 64")
     if args.preview_size < 64:
         raise ValueError("--preview-size must be >= 64")
     if args.gc_every_frames < 0:
         raise ValueError("--gc-every-frames must be >= 0")
+    if not (1 <= args.output_quality <= 100):
+        raise ValueError("--output-quality must be between 1 and 100")
+    if args.distance_min_scale <= 0:
+        raise ValueError("--distance-min-scale must be > 0")
+    if args.distance_max_scale < args.distance_min_scale:
+        raise ValueError("--distance-max-scale must be >= --distance-min-scale")
+    if args.offcenter_xy_scale < 0.0:
+        raise ValueError("--offcenter-xy-scale must be >= 0")
+    if args.offcenter_z_scale < 0.0:
+        raise ValueError("--offcenter-z-scale must be >= 0")
+    if not (0.0 <= args.center_hold_probability <= 1.0):
+        raise ValueError("--center-hold-probability must be in [0, 1]")
+    if not (0.0 <= args.cloud_probability <= 1.0):
+        raise ValueError("--cloud-probability must be in [0, 1]")
+    if args.cloud_max_layers < 0:
+        raise ValueError("--cloud-max-layers must be >= 0")
 
     if args.auto_approve_all_first and args.approval_mode != "off":
         newly_approved, already_approved = bulk_auto_approve(
@@ -883,6 +1273,16 @@ def main() -> None:
         elevation_max_deg=args.elevation_max,
         elevation_step_deg=args.elevation_step,
         gc_every_frames=args.gc_every_frames,
+        distance_min_scale=args.distance_min_scale,
+        distance_max_scale=args.distance_max_scale,
+        offcenter_xy_scale=args.offcenter_xy_scale,
+        offcenter_z_scale=args.offcenter_z_scale,
+        center_hold_probability=args.center_hold_probability,
+        cloud_probability=args.cloud_probability,
+        cloud_max_layers=args.cloud_max_layers,
+        frame_seed=args.seed,
+        output_format=output_format,
+        output_quality=args.output_quality,
     )
     images_index = build_existing_images_index(images_root)
 

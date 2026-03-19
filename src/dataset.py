@@ -3,22 +3,32 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import shutil
+import subprocess
+import tempfile
 from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Dict, List, Literal, Sequence, Tuple
 
 import pandas as pd
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as TF
 
+try:
+    from pillow_heif import register_heif_opener
+except ImportError:  # Optional dependency; JPEG/PNG/WebP still work without it.
+    register_heif_opener = None
+else:
+    register_heif_opener()
+
 
 ImageSample = Tuple[Path, float]
 CacheMode = Literal["off", "memory", "disk"]
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif", ".tif", ".tiff"}
 _NORM_MEAN = [0.485, 0.456, 0.406]
 _NORM_STD = [0.229, 0.224, 0.225]
 DEFAULT_CACHE_DIR = Path(".cache/image2rcs")
@@ -135,10 +145,53 @@ class ImageTensorCache:
         return self.cache_dir / f"{digest}.pt"
 
     @staticmethod
+    def _pil_image_to_tensor(image: Image.Image) -> torch.Tensor:
+        normalized = ImageOps.exif_transpose(image)
+        try:
+            rgb = normalized.convert("RGB")
+            try:
+                return TF.pil_to_tensor(rgb).contiguous()
+            finally:
+                rgb.close()
+        finally:
+            if normalized is not image:
+                normalized.close()
+
+    @staticmethod
+    def _decode_heif_with_sips(image_path: Path) -> torch.Tensor | None:
+        if image_path.suffix.lower() not in {".heic", ".heif"}:
+            return None
+        if shutil.which("sips") is None:
+            return None
+
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                tmp_path = Path(tmp.name)
+            subprocess.run(
+                ["sips", "-s", "format", "jpeg", str(image_path), "--out", str(tmp_path)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            with Image.open(tmp_path) as converted:
+                return ImageTensorCache._pil_image_to_tensor(converted)
+        except (subprocess.SubprocessError, OSError, ValueError):
+            return None
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    @staticmethod
     def _decode_to_tensor(image_path: Path) -> torch.Tensor:
-        with Image.open(image_path) as image:
-            rgb = image.convert("RGB")
-            return TF.pil_to_tensor(rgb).contiguous()
+        try:
+            with Image.open(image_path) as image:
+                return ImageTensorCache._pil_image_to_tensor(image)
+        except (OSError, ValueError):
+            converted = ImageTensorCache._decode_heif_with_sips(image_path)
+            if converted is not None:
+                return converted
+            raise
 
     def _load_disk_tensor(self, cache_path: Path) -> torch.Tensor | None:
         if not cache_path.exists():

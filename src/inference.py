@@ -4,9 +4,11 @@ from pathlib import Path
 from typing import Iterable
 
 import torch
+from torch.amp import autocast
 from torch.utils.data import DataLoader, Dataset
 
 from dataset import ImageTensorCache, build_image_transform, inverse_transform_target_tensor
+from device_utils import configure_torch_for_device, describe_device, resolve_device
 from model import build_model
 from perf_utils import autotune_num_workers, configure_cpu_threads, format_worker_timings, parse_num_workers
 
@@ -108,7 +110,8 @@ def predict_images(
 
         non_blocking = device.type == "cuda"
         batch_images = batch_images.to(device, non_blocking=non_blocking)
-        batch_pred = model(batch_images).squeeze(1)
+        with autocast(device_type="cuda", enabled=device.type == "cuda"):
+            batch_pred = model(batch_images).squeeze(1)
         batch_rcs = inverse_transform_target_tensor(batch_pred, mode=target_mode)
         batch_rcs = torch.clamp_min(batch_rcs, 0.0)
         batch_values = batch_rcs.detach().cpu().tolist()
@@ -132,7 +135,7 @@ def predict_images(
 
 
 def iter_images(path: Path) -> Iterable[Path]:
-    valid_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    valid_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif", ".tif", ".tiff"}
     if path.is_file():
         yield path
         return
@@ -146,10 +149,15 @@ def main():
     parser = argparse.ArgumentParser(description="Run RCS inference on a single image or image folder")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--input", type=str, required=True, help="Path to an image or a directory of images")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Compute device: auto|gpu|cuda|cuda:N|mps|cpu (auto prefers CUDA, then MPS, then CPU)",
+    )
     parser.add_argument("--batch-size", type=int, default=16, help="Inference batch size for directory input")
     parser.add_argument("--num-workers", type=str, default="auto", help='DataLoader workers, integer or "auto"')
-    parser.add_argument("--cache-mode", type=str, default="disk", choices=["off", "memory", "disk"])
+    parser.add_argument("--cache-mode", type=str, default="memory", choices=["off", "memory", "disk"])
     parser.add_argument("--cache-dir", type=str, default=".cache/image2rcs")
     parser.add_argument(
         "--memory-cache-items",
@@ -167,7 +175,9 @@ def main():
         raise ValueError("--memory-cache-items must be >= 1")
     configure_cpu_threads(args.cpu_threads if args.cpu_threads > 0 else None)
 
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
+    configure_torch_for_device(device)
+    print(f"Using device: {describe_device(device)}")
     model, transform, target_mode = load_checkpoint(args.checkpoint, device)
 
     input_path = Path(args.input)

@@ -55,6 +55,7 @@ Useful options:
 - `--cpu-threads N`: set Torch CPU thread count
 - `--eval-every N`: run validation every N epochs
 - `--profile`: print per-epoch timing split (`data_load`, `fwd_bwd`, `eval`, `ckpt_io`)
+- `--device auto|gpu|cuda|cuda:N|mps|cpu`: select compute backend (`auto` prefers CUDA, then Apple MPS, then CPU)
 
 ## Inference
 
@@ -91,6 +92,7 @@ Useful options:
 - `--cache-dir PATH`: cache directory for disk mode
 - `--cpu-threads N`: set Torch CPU thread count
 - `--profile`: print `images/sec` and timing split
+- `--device auto|gpu|cuda|cuda:N|mps|cpu`: select compute backend (`auto` prefers CUDA, then Apple MPS, then CPU)
 
 ## Benchmark
 

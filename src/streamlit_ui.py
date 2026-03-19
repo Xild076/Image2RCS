@@ -1,21 +1,59 @@
 from __future__ import annotations
 
 import inspect
+import io
+import math
+import shutil
+import subprocess
 import tempfile
 from html import escape
 from pathlib import Path
 
 import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 
+from device_utils import describe_device, mps_is_available, resolve_device
 from inference import load_checkpoint, predict_images
 
 
 DEFAULT_CHECKPOINT = Path("checkpoints") / "best_model.pt"
 DEFAULT_CSV = Path("data") / "aircraft_rcs.csv"
+RCS_EPSILON = 1e-8
+
+
+def safe_rcs(value: float, eps: float = RCS_EPSILON) -> float:
+    return float(max(float(value), eps))
+
+
+def to_dbsm(value_m2: float) -> float:
+    return float(10.0 * math.log10(safe_rcs(value_m2)))
+
+
+def format_rcs(value: float) -> str:
+    val = float(value)
+    abs_val = abs(val)
+    if abs_val == 0.0:
+        return "0.0000 m^2"
+    if abs_val < 1e-3 or abs_val >= 1e3:
+        return f"{val:.3e} m^2"
+    if abs_val >= 100:
+        return f"{val:.2f} m^2"
+    if abs_val >= 10:
+        return f"{val:.3f} m^2"
+    return f"{val:.4f} m^2"
+
+
+def compute_percentile(reference_rcs: pd.Series, predicted_rcs: float) -> float:
+    values = pd.to_numeric(reference_rcs, errors="coerce").dropna().to_numpy(dtype=float)
+    if values.size == 0:
+        return 0.0
+    lower = float(np.sum(values < predicted_rcs))
+    equal = float(np.sum(values == predicted_rcs))
+    return ((lower + (0.5 * equal)) / float(values.size)) * 100.0
 
 
 def _supports_kwarg(fn, kwarg: str) -> bool:
@@ -34,6 +72,30 @@ def render_responsive_image(image: Image.Image, caption: str) -> None:
     elif _supports_kwarg(st.image, "width"):
         kwargs["width"] = 520
     st.image(image, **kwargs)
+
+
+def load_uploaded_preview(uploaded_file) -> Image.Image:
+    raw_bytes = uploaded_file.getvalue()
+    suffix = Path(getattr(uploaded_file, "name", "")).suffix.lower()
+    try:
+        with Image.open(io.BytesIO(raw_bytes)) as raw_preview:
+            return ImageOps.exif_transpose(raw_preview).convert("RGB")
+    except (OSError, ValueError):
+        if suffix not in {".heic", ".heif"} or shutil.which("sips") is None:
+            raise
+
+        with tempfile.TemporaryDirectory(prefix="image2rcs_preview_") as tmp_dir:
+            src_path = Path(tmp_dir) / f"upload{suffix or '.heic'}"
+            dst_path = Path(tmp_dir) / "converted_preview.jpg"
+            src_path.write_bytes(raw_bytes)
+            subprocess.run(
+                ["sips", "-s", "format", "jpeg", str(src_path), "--out", str(dst_path)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            with Image.open(dst_path) as converted:
+                return ImageOps.exif_transpose(converted).convert("RGB")
 
 
 def render_full_width_button(label: str, **kwargs) -> bool:
@@ -79,8 +141,9 @@ def inject_styles() -> None:
             --border-light: #e2e8f0;
             --accent: #0f172a;
             --accent-hover: #1e293b;
-            --accent-blue: #0ea5e9;
-            --predict: #f97316;
+            --accent-blue: #0284c7;
+            --predict: #ea580c;
+            --predict-soft: #fed7aa;
             --chart-bg: #ffffff;
             --chart-grid: #f1f5f9;
             --shadow-subtle: 0 2px 8px rgba(0, 0, 0, 0.06);
@@ -331,10 +394,10 @@ def inject_styles() -> None:
 
         /* Altair Chart Container */
         [data-testid="stVegaLiteChart"] {
-            background: #ffffff !important;
-            border: 1px solid var(--border-light);
+            background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%) !important;
+            border: 1px solid #dbeafe;
             border-radius: 16px;
-            padding: 0.9rem;
+            padding: 1rem;
             margin: 1rem 0 0.7rem;
             box-shadow: var(--shadow-subtle);
         }
@@ -552,7 +615,7 @@ def load_reference_table(csv_path: str) -> pd.DataFrame:
 
 @st.cache_resource(show_spinner=True)
 def load_inference_bundle(checkpoint_path: str, device_name: str):
-    device = torch.device(device_name)
+    device = resolve_device(device_name)
     model, transform, target_mode = load_checkpoint(checkpoint_path=checkpoint_path, device=device)
     return model, transform, target_mode, device
 
@@ -593,9 +656,17 @@ def run_single_inference(uploaded_file, bundle) -> tuple[float, dict]:
 
 def build_comparison_dataset(reference_df: pd.DataFrame, predicted_rcs: float, max_items: int) -> pd.DataFrame:
     ref = reference_df.copy()
-    ref["distance"] = (ref["rcs"].apply(lambda val: abs(val - predicted_rcs))).astype(float)
+    predicted_safe = safe_rcs(predicted_rcs)
+    pred_log = math.log10(predicted_safe)
 
-    nearest = ref.nsmallest(max_items, "distance")
+    ref["rcs_safe"] = ref["rcs"].clip(lower=RCS_EPSILON).astype(float)
+    ref["distance_abs"] = (ref["rcs"] - predicted_rcs).abs().astype(float)
+    # Use log-distance so nearest neighbors are accurate for multiplicative RCS scales.
+    ref["distance_log"] = (np.log10(ref["rcs_safe"]) - pred_log).abs().astype(float)
+    ref["ratio_to_prediction"] = (ref["rcs_safe"] / predicted_safe).astype(float)
+    ref["delta_db"] = (10.0 * np.log10(ref["ratio_to_prediction"])).astype(float)
+
+    nearest = ref.nsmallest(max_items, "distance_log")
     anchors = ref.sort_values("rcs", ascending=False).head(2)
     anchors = pd.concat([anchors, ref.sort_values("rcs", ascending=True).head(2)], ignore_index=True)
 
@@ -609,17 +680,41 @@ def build_comparison_dataset(reference_df: pd.DataFrame, predicted_rcs: float, m
                 "aircraft_name": "Your Uploaded Image",
                 "aircraft_type": "prediction",
                 "rcs": predicted_rcs,
+                "rcs_safe": predicted_safe,
+                "distance_abs": 0.0,
+                "distance_log": 0.0,
+                "ratio_to_prediction": 1.0,
+                "delta_db": 0.0,
                 "source": "Prediction",
             }
         ]
     )
-    chart_df = pd.concat([display[["aircraft_name", "aircraft_type", "rcs", "source"]], predicted_row], ignore_index=True)
+    chart_df = pd.concat(
+        [
+            display[
+                [
+                    "aircraft_name",
+                    "aircraft_type",
+                    "rcs",
+                    "rcs_safe",
+                    "distance_abs",
+                    "distance_log",
+                    "ratio_to_prediction",
+                    "delta_db",
+                    "source",
+                ]
+            ],
+            predicted_row,
+        ],
+        ignore_index=True,
+    )
     return chart_df
 
 
 def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
     plot_df = chart_df.copy()
-    plot_df["rcs_plot"] = plot_df["rcs"].clip(lower=1e-5)
+    plot_df["rcs_plot"] = plot_df["rcs_safe"].clip(lower=RCS_EPSILON)
+    plot_df["dbsm"] = plot_df["rcs_plot"].map(to_dbsm)
     low = max(float(plot_df["rcs_plot"].min()) * 0.6, 1e-5)
     high = max(float(plot_df["rcs_plot"].max()) * 1.7, low * 10.0)
     y_order = plot_df.sort_values("rcs_plot", ascending=False)["aircraft_name"].tolist()
@@ -629,44 +724,96 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
         prediction_value = float(plot_df.loc[prediction_mask, "rcs_plot"].iloc[0])
     else:
         prediction_value = float(plot_df["rcs_plot"].median())
+    lower_band = max(prediction_value / 2.0, low)
+    upper_band = min(prediction_value * 2.0, high)
 
-    points = (
-        alt.Chart(plot_df)
-        .mark_circle(stroke="#0f172a", strokeWidth=1.5, opacity=0.85)
-        .encode(
-            x=alt.X(
-                "rcs_plot:Q",
-                title="Radar Cross-Section (m², log scale)",
-                scale=alt.Scale(type="log", domain=[low, high]),
-                axis=alt.Axis(labelFontSize=12, titleFontSize=13, format=".1e", gridColor="#e5e7eb", titleColor="#475569", labelColor="#64748b", domainColor="#cbd5e1", tickColor="#cbd5e1", titlePadding=15),
+    log_low = math.log10(low)
+    log_high = math.log10(high)
+    log_span = max(log_high - log_low, 1e-6)
+    plot_df["marker_scale"] = ((np.log10(plot_df["rcs_plot"]) - log_low) / log_span).clip(0.0, 1.0)
+    plot_df["marker_size"] = 95.0 + (530.0 * np.power(plot_df["marker_scale"], 0.82))
+    plot_df.loc[plot_df["source"] == "Prediction", "marker_size"] *= 1.10
+    plot_df["marker_size"] = plot_df["marker_size"].clip(lower=90.0, upper=760.0)
+
+    base = alt.Chart(plot_df).encode(
+        x=alt.X(
+            "rcs_plot:Q",
+            title="Radar Cross-Section (m^2, log scale)",
+            scale=alt.Scale(type="log", domain=[low, high]),
+            axis=alt.Axis(
+                labelFontSize=12,
+                titleFontSize=13,
+                format=".2e",
+                gridColor="#e2e8f0",
+                titleColor="#334155",
+                labelColor="#475569",
+                domainColor="#cbd5e1",
+                tickColor="#cbd5e1",
+                titlePadding=15,
             ),
-            y=alt.Y("aircraft_name:N", title=None, sort=y_order, axis=alt.Axis(labelFontSize=12, labelColor="#334155", domainColor="#cbd5e1", tickColor="#cbd5e1", labelPadding=12)),
-            size=alt.Size("rcs_plot:Q", title="RCS", scale=alt.Scale(range=[200, 2200]), legend=None),
-            fill=alt.condition(
-                alt.datum.source == "Prediction",
-                alt.value("#f97316"),
-                alt.Color(
-                    "aircraft_type:N",
-                    legend=alt.Legend(title="Aircraft Type", labelFontSize=11, titleFontSize=12, symbolSize=180, titleColor="#475569", labelColor="#334155"),
-                    scale=alt.Scale(
-                        range=[
-                            "#0284c7", "#10b981", "#8b5cf6", "#f59e0b",
-                            "#ef4444", "#0ea5e9", "#6366f1", "#14b8a6",
-                        ]
-                    ),
-                ),
+        ),
+        y=alt.Y(
+            "aircraft_name:N",
+            title=None,
+            sort=y_order,
+            axis=alt.Axis(labelFontSize=12, labelColor="#334155", domainColor="#cbd5e1", tickColor="#cbd5e1", labelPadding=12),
+        ),
+        tooltip=[
+            alt.Tooltip("aircraft_name:N", title="Aircraft"),
+            alt.Tooltip("aircraft_type:N", title="Type"),
+            alt.Tooltip("rcs:Q", title="RCS (m^2)", format=".6f"),
+            alt.Tooltip("dbsm:Q", title="RCS (dBsm)", format=".2f"),
+            alt.Tooltip("distance_abs:Q", title="|Delta| m^2", format=".6f"),
+            alt.Tooltip("distance_log:Q", title="|Delta| log10", format=".3f"),
+            alt.Tooltip("delta_db:Q", title="Delta (dB)", format=".2f"),
+            alt.Tooltip("source:N", title="Source"),
+        ],
+    )
+
+    references = base.transform_filter(alt.datum.source == "Reference").mark_circle(
+        stroke="#0f172a",
+        strokeWidth=1.0,
+        opacity=0.82,
+    ).encode(
+        size=alt.Size("marker_size:Q", scale=None, legend=None),
+        color=alt.Color(
+            "aircraft_type:N",
+            legend=alt.Legend(
+                title="Aircraft Type",
+                labelFontSize=11,
+                titleFontSize=12,
+                symbolSize=160,
+                titleColor="#334155",
+                labelColor="#334155",
             ),
-            opacity=alt.condition(alt.datum.source == "Prediction", alt.value(1.0), alt.value(0.78)),
-            tooltip=[
-                alt.Tooltip("aircraft_name:N", title="Aircraft"),
-                alt.Tooltip("aircraft_type:N", title="Type"),
-                alt.Tooltip("rcs:Q", title="RCS (m²)", format=".6f"),
-                alt.Tooltip("source:N", title="Source"),
-            ],
+            scale=alt.Scale(
+                range=[
+                    "#0d9488",
+                    "#2563eb",
+                    "#dc2626",
+                    "#7c3aed",
+                    "#ca8a04",
+                    "#0891b2",
+                    "#be123c",
+                    "#4338ca",
+                ]
+            ),
         )
     )
 
-    rule_df = pd.DataFrame({"rcs_plot": [prediction_value], "label": [f"Prediction: {prediction_value:.3e} m²"]})
+    prediction = base.transform_filter(alt.datum.source == "Prediction").mark_point(
+        shape="diamond",
+        filled=True,
+        stroke="#9a3412",
+        strokeWidth=1.5,
+        color="#ea580c",
+        opacity=1.0,
+    ).encode(size=alt.Size("marker_size:Q", scale=None, legend=None))
+
+    band_df = pd.DataFrame({"x0": [lower_band], "x1": [upper_band]})
+    confidence_band = alt.Chart(band_df).mark_rect(color="#fed7aa", opacity=0.26).encode(x="x0:Q", x2="x1:Q")
+
+    rule_df = pd.DataFrame({"rcs_plot": [prediction_value], "label": [f"Prediction: {prediction_value:.3e} m^2"]})
     prediction_rule = alt.Chart(rule_df).mark_rule(color="#ea580c", strokeDash=[6, 4], strokeWidth=2.0).encode(x="rcs_plot:Q")
     rule_label = (
         alt.Chart(rule_df)
@@ -682,12 +829,12 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
     )
 
     chart = (
-        (prediction_rule + points + rule_label)
+        (confidence_band + prediction_rule + references + prediction + rule_label)
         .properties(
             height=min(max(480, 38 * len(plot_df)), 880),
             title=alt.TitleParams(
                 text="RCS Comparison Mapping",
-                subtitle=["Your prediction (orange) highlighted against reference aircraft."],
+                subtitle=["Nearest aircraft are chosen using log-distance for better multiplicative RCS accuracy."],
                 fontSize=18,
                 fontWeight=800,
                 subtitleFontSize=13,
@@ -765,15 +912,19 @@ def main() -> None:
         csv_path = st.text_input("Reference CSV path", value=str(DEFAULT_CSV))
         compare_count = st.slider("Comparison entries", min_value=8, max_value=40, value=18, step=2)
         show_profile = st.checkbox("Show inference timing", value=False)
+        device_options = ["auto", "cpu"]
         if torch.cuda.is_available():
-            device_name = st.selectbox("Device", options=["cuda", "cpu"], index=0)
-        else:
-            device_name = "cpu"
-            st.caption("CUDA not detected. Running on CPU.")
+            device_options.insert(1, "cuda")
+        if mps_is_available():
+            device_options.insert(1, "mps")
+        device_name = st.selectbox("Device", options=device_options, index=0)
+        if not torch.cuda.is_available() and not mps_is_available():
+            st.caption("No GPU backend detected. Running on CPU.")
         st.markdown(
             """
             <div class="sidebar-note">
                 Comparison entries controls how many nearest reference aircraft are shown in the chart.
+                Nearness is computed in log-space to better reflect multiplicative RCS scales.
             </div>
             """,
             unsafe_allow_html=True,
@@ -783,14 +934,20 @@ def main() -> None:
 
     with left_col:
         st.markdown('<div class="section-kicker">Step 1</div><h3 class="section-head">Input Image</h3>', unsafe_allow_html=True)
-        uploaded_file = st.file_uploader("Upload aircraft image", type=["jpg", "jpeg", "png", "webp", "bmp"])
+        uploaded_file = st.file_uploader(
+            "Upload aircraft image",
+            type=["jpg", "jpeg", "png", "webp", "bmp", "heic", "heif", "tif", "tiff"],
+        )
         if uploaded_file is not None:
-            preview = Image.open(uploaded_file).convert("RGB")
-            render_responsive_image(preview, caption="Uploaded image preview")
-            st.markdown(
-                '<p class="mini-note">Tip: front, side, or top views usually produce more stable comparisons.</p>',
-                unsafe_allow_html=True,
-            )
+            try:
+                preview = load_uploaded_preview(uploaded_file)
+                render_responsive_image(preview, caption="Uploaded image preview")
+                st.markdown(
+                    '<p class="mini-note">Tip: front, side, or top views usually produce more stable comparisons.</p>',
+                    unsafe_allow_html=True,
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                st.error(f"Could not preview this image format: {exc}")
         else:
             st.markdown(
                 '<p class="mini-note">No file selected yet. Upload one image to run single-image inference.</p>',
@@ -808,21 +965,24 @@ def main() -> None:
                 try:
                     reference_df = load_reference_table(csv_path)
                     bundle = load_inference_bundle(checkpoint_path, device_name)
+                    st.caption(f"Runtime device: {describe_device(bundle[3])}")
                     predicted_rcs, profile_stats = run_single_inference(uploaded_file, bundle)
 
                     closest_idx = (reference_df["rcs"] - predicted_rcs).abs().idxmin()
                     closest = reference_df.loc[closest_idx]
                     closest_rcs = float(closest["rcs"])
                     delta_rcs = predicted_rcs - closest_rcs
-                    percentile = float((reference_df["rcs"] <= predicted_rcs).mean() * 100.0)
+                    ratio_to_closest = safe_rcs(predicted_rcs) / safe_rcs(closest_rcs)
+                    delta_db = 10.0 * math.log10(ratio_to_closest)
+                    percentile = compute_percentile(reference_df["rcs"], predicted_rcs)
 
                     m1_col, m2_col, m3_col, m4_col = st.columns(4, gap="small")
                     with m1_col:
-                        st.metric("Predicted RCS", f"{predicted_rcs:.4f} m²")
+                        st.metric("Predicted RCS", format_rcs(predicted_rcs), f"{to_dbsm(predicted_rcs):+.2f} dBsm")
                     with m2_col:
                         st.metric("Closest Match", str(closest["aircraft_name"]))
                     with m3_col:
-                        st.metric("Difference", f"{delta_rcs:+.4f} m²")
+                        st.metric("Difference", format_rcs(delta_rcs), f"{delta_db:+.2f} dB")
                     with m4_col:
                         st.metric("Percentile Rank", f"{percentile:.1f}%")
 
@@ -830,8 +990,9 @@ def main() -> None:
                     closest_name = escape(str(closest["aircraft_name"]))
                     st.markdown(
                         (
-                            f'<div class="result-note">✨ <div>Prediction is <strong>{abs(delta_rcs):.4f} m² {direction_text}</strong> '
-                            f"than closest reference <strong>{closest_name}</strong> ({closest_rcs:.4f} m²).</div></div>"
+                            f'<div class="result-note">✨ <div>Prediction is <strong>{format_rcs(abs(delta_rcs))} {direction_text}</strong> '
+                            f"than closest reference <strong>{closest_name}</strong> ({format_rcs(closest_rcs)}). "
+                            f"Relative offset: <strong>{delta_db:+.2f} dB</strong>.</div></div>"
                         ),
                         unsafe_allow_html=True,
                     )
@@ -842,7 +1003,11 @@ def main() -> None:
 
                     with st.expander("Show comparison table", expanded=False):
                         table = chart_df.sort_values("rcs", ascending=False).reset_index(drop=True).copy()
-                        table["rcs"] = table["rcs"].map(lambda value: float(value))
+                        table["rcs_m2"] = table["rcs"].map(format_rcs)
+                        table["rcs_dbsm"] = table["rcs_safe"].map(lambda v: f"{to_dbsm(v):.2f}")
+                        table["delta_db"] = table["delta_db"].map(lambda v: f"{float(v):+.2f}")
+                        table["log_distance"] = table["distance_log"].map(lambda v: f"{float(v):.3f}")
+                        table = table[["aircraft_name", "aircraft_type", "source", "rcs_m2", "rcs_dbsm", "delta_db", "log_distance"]]
                         render_responsive_dataframe(table, hide_index=True)
 
                     if show_profile:

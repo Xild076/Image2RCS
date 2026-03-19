@@ -13,6 +13,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 from dataset import AircraftRCSDataset, build_image_transform, inverse_transform_target_tensor, load_image_samples
+from device_utils import configure_torch_for_device, describe_device, resolve_device
 from model import build_model
 from perf_utils import autotune_num_workers, configure_cpu_threads, format_worker_timings, parse_num_workers
 import ssl
@@ -207,7 +208,7 @@ def run_epoch(model, loader, criterion, optimizer, device, scaler):
         targets = targets.to(device, non_blocking=non_blocking)
 
         optimizer.zero_grad(set_to_none=True)
-        with autocast(device_type=device.type, enabled=device.type == "cuda"):
+        with autocast(device_type="cuda", enabled=device.type == "cuda"):
             predictions = model(images)
             loss = criterion(predictions, targets)
 
@@ -246,8 +247,9 @@ def evaluate(model, loader, criterion, device, target_mode: str):
         images = images.to(device, non_blocking=non_blocking)
         targets = targets.to(device, non_blocking=non_blocking)
 
-        predictions = model(images)
-        loss = criterion(predictions, targets)
+        with autocast(device_type="cuda", enabled=device.type == "cuda"):
+            predictions = model(images)
+            loss = criterion(predictions, targets)
 
         pred_values = predictions.squeeze(1)
         target_values = targets.squeeze(1)
@@ -288,7 +290,7 @@ def main():
     parser.add_argument("--csv-path", type=str, default="data/aircraft_rcs.csv")
     parser.add_argument("--images-root", type=str, default="data/images")
     parser.add_argument("--output", type=str, default="checkpoints/best_model.pt")
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=str, default="auto", help='DataLoader workers, integer or "auto"')
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -297,9 +299,14 @@ def main():
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--target-mode", type=str, default="log1p", choices=["log1p", "none"])
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Compute device: auto|gpu|cuda|cuda:N|mps|cpu (auto prefers CUDA, then MPS, then CPU)",
+    )
     parser.add_argument("--no-pretrained", action="store_true")
-    parser.add_argument("--cache-mode", type=str, default="disk", choices=["off", "memory", "disk"])
+    parser.add_argument("--cache-mode", type=str, default="memory", choices=["off", "memory", "disk"])
     parser.add_argument("--cache-dir", type=str, default=".cache/image2rcs")
     parser.add_argument(
         "--memory-cache-items",
@@ -350,7 +357,9 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
+    configure_torch_for_device(device)
+    print(f"Using device: {describe_device(device)}")
     train_loader, val_loader = create_dataloaders(
         csv_path=args.csv_path,
         images_root=args.images_root,
@@ -388,7 +397,7 @@ def main():
         criterion = nn.SmoothL1Loss(beta=args.smoothl1_beta)
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
-    scaler = GradScaler(device=device.type, enabled=device.type == "cuda")
+    scaler = GradScaler(device="cuda" if device.type == "cuda" else "cpu", enabled=device.type == "cuda")
 
     best_val_loss = float("inf")
     profile_rows: list[dict[str, float]] = []
