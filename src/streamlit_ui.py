@@ -131,25 +131,23 @@ def inject_styles() -> None:
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@300;400;500;600;700&family=JetBrains+Mono:wght@100..800&display=swap');
 
         :root {
-            --bg-color: #FAFAFA;
-            --panel-bg: #FFFFFF;
-            --text-main: #2C363F;
-            --text-muted: #6A7B82;
-            --text-light: #A0AEB4;
-            --border: #EAEAE4;
-            --border-light: #F4F4EF;
-            --accent: #4A6C6F;
-            --accent-hover: #365255;
-            --predict: #D4795B;
-            --predict-soft: #FBF1ED;
-            --shadow-soft: 0 4px 16px rgba(44, 54, 63, 0.04);
-            --shadow-float: 0 16px 40px rgba(44, 54, 63, 0.08);
+            --bg-color: #0d0f12;
+            --panel-bg: #15181e;
+            --text-main: #f0f4f8;
+            --text-muted: #8b949e;
+            --text-light: #525b66;
+            --border: #242b35;
+            --border-light: #1c212a;
+            --accent: #ff4500; /* Safety Orange */
+            --accent-hover: #ff5722;
+            --predict: #d4ff00; /* Acid Yellow */
+            --predict-soft: rgba(212, 255, 0, 0.05);
+            --shadow-soft: 0 4px 0px rgba(36, 43, 53, 0.4);
+            --shadow-float: 4px 4px 0px rgba(255, 69, 0, 0.6);
         }
-
-        * { box-sizing: border-box; }
 
         /* Base setup */
         html, body {
@@ -159,132 +157,128 @@ def inject_styles() -> None:
 
         .stApp {
             background-color: var(--bg-color);
-            font-family: 'Outfit', sans-serif;
+            font-family: 'JetBrains Mono', monospace;
             color: var(--text-main);
+            background-image: radial-gradient(var(--border-light) 1px, transparent 1px);
+            background-size: 24px 24px;
         }
 
-        .main .block-container {
-            max-width: 1400px;
-            padding: 3rem 4rem;
-        }
-        
         [data-testid="stAppViewContainer"] {
             background-color: transparent;
         }
-        
+
         /* Typography */
         h1, h2, h3, h4, h5, h6 {
             color: var(--text-main) !important;
-            font-family: 'Playfair Display', serif !important;
-            letter-spacing: -0.01em;
+            font-family: 'Chakra Petch', sans-serif !important;
+            letter-spacing: 0.02em;
             font-weight: 600 !important;
+            text-transform: uppercase;
         }
 
         p, span, div {
-            font-family: 'Outfit', sans-serif;
+            font-family: 'JetBrains Mono', monospace;
             color: var(--text-main);
             line-height: 1.6;
-            letter-spacing: 0.01em;
         }
 
         /* Hero Container */
         .hero {
-            background: var(--panel-bg);
+            background: var(--bg-color);
             border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 4rem;
+            border-left: 4px solid var(--accent);
+            padding: 3rem;
             color: var(--text-main);
-            box-shadow: var(--shadow-float);
             margin-bottom: 3rem;
             position: relative;
             overflow: hidden;
             display: flex;
             flex-direction: column;
-            align-items: center;
-            text-align: center;
+            align-items: flex-start;
+            text-align: left;
+            box-shadow: var(--shadow-float);
+            border-radius: 2px;
+        }
+        .hero::before {
+            content: "SYS.REQ.01";
+            position: absolute;
+            top: 1rem;
+            right: 1.5rem;
+            font-size: 0.75rem;
+            color: var(--border);
+            font-family: 'JetBrains Mono', monospace;
         }
         .hero-eyebrow {
             display: inline-block;
-            margin-bottom: 1.2rem;
-            padding: 0.4rem 1.2rem;
-            background: rgba(74, 108, 111, 0.1);
-            border-radius: 40px;
-            font-size: 0.85rem;
-            font-weight: 500;
-            letter-spacing: 0.08em;
+            margin-bottom: 1rem;
+            padding: 0.25rem 0.75rem;
+            background: var(--text-main);
+            color: var(--bg-color);
+            font-size: 0.8rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
             text-transform: uppercase;
-            color: var(--accent);
-            z-index: 1;
+            border-radius: 2px;
         }
         .hero h1 {
             margin: 0;
-            font-size: clamp(2.5rem, 4vw, 3.5rem);
+            font-size: clamp(2rem, 3vw, 3rem);
             font-weight: 700 !important;
-            line-height: 1.2;
+            line-height: 1.1;
             color: var(--text-main) !important;
-            z-index: 1;
         }
         .hero p {
-            margin: 1.5rem auto 0;
-            font-size: 1.15rem;
+            margin: 1.5rem 0 0;
+            font-size: 1rem;
             color: var(--text-muted) !important;
-            max-width: 650px;
-            z-index: 1;
+            max-width: 700px;
         }
 
         /* Sidebar Styling */
         [data-testid="stSidebar"] {
-            background: #F4F4EF;
+            background: #0f1115;
             border-right: 1px solid var(--border);
         }
         [data-testid="stSidebar"] hr {
             border-color: var(--border);
         }
         [data-testid="stSidebar"] label {
-            color: var(--text-main) !important;
-            font-weight: 500;
-            font-size: 0.9rem;
-        }
-        
-        /* Metric Cards */
-        [data-testid="stMetric"] {
-            background: var(--panel-bg);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 1.5rem;
-            transition: all 0.3s ease;
-            position: relative;
-            box-shadow: var(--shadow-soft);
-        }
-        [data-testid="stMetric"]::before {
-            content: "";
-            position: absolute;
-            top: 0; left: 0;
-            width: 4px; height: 100%;
-            background: var(--accent);
-            border-radius: 8px 0 0 8px;
-        }
-        [data-testid="stMetric"]:hover {
-            transform: translateY(-2px);
-            box-shadow: var(--shadow-float);
-            border-color: var(--border-light);
-        }
-        
-        /* First metric (Prediction) gets subtle accent */
-        [data-testid="column"]:first-child [data-testid="stMetric"]::before {
-            background: var(--predict);
+            color: var(--text-muted) !important;
+            font-family: 'Chakra Petch', sans-serif !important;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+            font-size: 0.85rem;
         }
 
+        /* Metric Cards */
+        [data-testid="stMetric"] {
+            background: #15181e;
+            border: 1px solid var(--border);
+            padding: 1.25rem;
+            position: relative;
+            box-shadow: 2px 2px 0px var(--border);
+            transition: all 0.2s ease;
+            border-radius: 2px;
+        }
+        [data-testid="stMetric"]:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 4px 4px 0px var(--accent);
+            border-color: var(--accent);
+        }
+        [data-testid="stMetric"]::before {
+            display: none;
+        }
         [data-testid="stMetricValue"] {
-            font-size: 1.7rem !important;
-            font-weight: 500 !important;
-            color: var(--text-main) !important;
-            font-family: 'Playfair Display', serif !important;
+            font-size: 1.8rem !important;
+            font-weight: 700 !important;
+            color: var(--predict) !important;
+            font-family: 'Chakra Petch', sans-serif !important;
         }
         [data-testid="stMetricLabel"] {
             color: var(--text-muted) !important;
-            font-size: 0.85rem !important;
-            font-weight: 500 !important;
+            font-size: 0.8rem !important;
+            font-family: 'JetBrains Mono', monospace !important;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             margin-bottom: 0.5rem;
@@ -292,149 +286,158 @@ def inject_styles() -> None:
 
         /* Buttons */
         .stButton > button {
-            background: var(--panel-bg) !important;
-            color: var(--text-main) !important;
-            border: 1px solid var(--border) !important;
-            border-radius: 6px !important;
-            font-family: 'Outfit', sans-serif !important;
-            font-weight: 500 !important;
-            font-size: 1.05rem !important;
+            background: transparent !important;
+            color: var(--accent) !important;
+            border: 1px solid var(--accent) !important;
+            border-radius: 2px !important;
+            font-family: 'Chakra Petch', sans-serif !important;
+            font-weight: 600 !important;
+            font-size: 1rem !important;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
             padding: 0.8rem 1.5rem !important;
-            transition: all 0.2s ease !important;
-            box-shadow: var(--shadow-soft);
+            transition: all 0.1s ease !important;
+            box-shadow: 2px 2px 0px rgba(255, 69, 0, 0.3) !important;
         }
         .stButton > button[kind="primary"] {
-            background: var(--text-main) !important;
-            color: #FFFFFF !important;
-            border: 1px solid var(--text-main) !important;
+            background: var(--accent) !important;
+            color: #000 !important;
+            border: 1px solid var(--accent) !important;
+            box-shadow: 3px 3px 0px var(--border) !important;
         }
         .stButton > button:hover {
-            transform: translateY(-1px) !important;
-            box-shadow: var(--shadow-float) !important;
+            transform: translate(-1px, -1px) !important;
+            box-shadow: 4px 4px 0px var(--predict) !important;
         }
         .stButton > button[kind="primary"]:hover {
-            background: #4A5560 !important;
-            color: #FFFFFF !important;
-            border-color: #4A5560 !important;
+            background: var(--predict) !important;
+            border-color: var(--predict) !important;
+            color: #000 !important;
         }
 
         /* Altair Chart Container */
         [data-testid="stVegaLiteChart"] {
-            background: var(--panel-bg) !important;
+            background: #0f1115 !important;
             border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 1.5rem;
-            margin: 1.5rem 0 1rem;
-            box-shadow: var(--shadow-soft);
+            padding: 1rem;
+            margin: 1rem 0;
+            box-shadow: 2px 2px 0px var(--border);
+            border-radius: 2px;
         }
 
         /* File Uploader */
         [data-testid="stFileUploaderDropzone"] {
-            background: var(--panel-bg);
-            border: 1px dashed var(--text-light) !important;
-            border-radius: 8px;
-            transition: all 0.3s ease;
-            box-shadow: var(--shadow-soft);
+            background: #0f1115 !important;
+            border: 1px dashed var(--border) !important;
+            border-radius: 2px;
+            transition: all 0.2s ease;
         }
         [data-testid="stFileUploaderDropzone"]:hover {
-            border: 1px solid var(--accent) !important;
-            background: #F9FAFA;
+            border: 1px dashed var(--accent) !important;
+            background: rgba(255, 69, 0, 0.05) !important;
         }
         [data-testid="stFileUploaderDropzone"] * {
-            color: var(--text-main) !important;
+            color: var(--text-muted) !important;
+            font-family: 'JetBrains Mono', monospace;
         }
-        
+
         /* Status / Result Messages */
         .result-note {
-            background: var(--predict-soft);
-            border: 1px solid rgba(212, 121, 91, 0.2);
-            border-radius: 8px;
-            padding: 1.2rem 1.5rem;
+            background: var(--bg-color);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--predict);
+            padding: 1.2rem;
             color: var(--text-main);
-            font-size: 1.05rem;
+            font-size: 0.95rem;
             line-height: 1.6;
             margin: 2rem 0;
-            box-shadow: var(--shadow-soft);
+            font-family: 'JetBrains Mono', monospace;
+            box-shadow: 2px 2px 0px var(--predict-soft);
         }
         .result-note strong {
             color: var(--predict);
-            font-weight: 500;
+            font-family: 'Chakra Petch', sans-serif;
+            font-size: 1.1em;
+            font-weight: 600;
         }
-        
+
         .placeholder-note {
-            background: var(--panel-bg);
+            background: transparent;
             border: 1px dashed var(--border);
-            border-radius: 8px;
             padding: 3rem 2rem;
             text-align: center;
-            color: var(--text-muted);
-            font-size: 1.1rem;
+            color: var(--text-light);
+            font-size: 0.9rem;
             margin-top: 1.5rem;
-            box-shadow: var(--shadow-soft);
+            text-transform: uppercase;
+            font-family: 'Chakra Petch', sans-serif;
+            letter-spacing: 0.1em;
         }
 
         /* Expanders & Table */
         [data-testid="stExpander"] {
-            border-radius: 8px !important;
+            border-radius: 2px !important;
             border: 1px solid var(--border) !important;
-            background: var(--panel-bg) !important;
+            background: #0d0f12 !important;
             margin-top: 1.5rem;
-            box-shadow: var(--shadow-soft);
         }
         [data-testid="stExpander"] > div:first-child {
-            background: var(--bg-color) !important;
+            background: #0f1115 !important;
             border-bottom: 1px solid var(--border) !important;
-            padding: 1rem 1.2rem !important;
+            padding: 1rem !important;
         }
         [data-testid="stExpander"] > div:first-child p {
-            color: var(--text-main) !important;
-            font-weight: 500 !important;
+            color: var(--accent) !important;
+            font-family: 'Chakra Petch', sans-serif !important;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600 !important;
         }
-        
+
         [data-testid="stDataFrame"] {
             border: 1px solid var(--border);
-            border-radius: 6px;
-            overflow: hidden;
+            border-radius: 2px;
         }
 
         /* Input Fields */
         input, select, textarea {
-            background-color: var(--panel-bg) !important;
-            border-radius: 6px !important;
+            background-color: #0f1115 !important;
+            border-radius: 2px !important;
             border: 1px solid var(--border) !important;
-            font-family: 'Outfit', sans-serif !important;
+            font-family: 'JetBrains Mono', monospace !important;
             color: var(--text-main) !important;
+            font-size: 0.9rem !important;
         }
         input:focus, select:focus, textarea:focus {
             border-color: var(--accent) !important;
-            box-shadow: 0 0 0 2px rgba(74, 108, 111, 0.1) !important;
+            box-shadow: none !important;
+            outline: 1px solid var(--accent) !important;
         }
 
         /* Tweak images */
         [data-testid="stImage"] {
-            background: var(--panel-bg);
-            padding: 0.5rem;
-            border-radius: 8px;
+            background: transparent;
+            padding: 0;
             border: 1px solid var(--border);
-            box-shadow: var(--shadow-soft);
+            box-shadow: 3px 3px 0px var(--border);
         }
         [data-testid="stImage"] img {
-            border-radius: 4px;
+            filter: grayscale(10%) sepia(5%);
+            border-radius: 0;
         }
 
         .section-kicker {
             display: inline-block;
-            background: var(--border);
-            color: var(--text-muted);
-            padding: 0.25rem 0.75rem;
-            border-radius: 20px;
+            background: var(--text-main);
+            color: var(--bg-color);
+            padding: 0.2rem 0.5rem;
             font-size: 0.75rem;
-            font-weight: 500;
+            font-weight: 700;
             margin-bottom: 0.5rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
+            font-family: 'JetBrains Mono', monospace;
         }
-        
         </style>
         """,
         unsafe_allow_html=True,
@@ -587,11 +590,11 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
                 labelFontSize=12,
                 titleFontSize=13,
                 format=".2e",
-                gridColor="#EAEAE4",
+                gridColor="#242b35",
                 titleColor="#2C363F",
                 labelColor="#6A7B82",
-                domainColor="#EAEAE4",
-                tickColor="#EAEAE4",
+                domainColor="#242b35",
+                tickColor="#242b35",
                 titlePadding=15,
                 gridDash=[4, 4],
             ),
@@ -600,7 +603,7 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
             "aircraft_name:N",
             title=None,
             sort=y_order,
-            axis=alt.Axis(labelFontSize=12, labelColor="#6A7B82", domainColor="#EAEAE4", tickColor="#EAEAE4", labelPadding=12),
+            axis=alt.Axis(labelFontSize=12, labelColor="#6A7B82", domainColor="#242b35", tickColor="#242b35", labelPadding=12),
         ),
         tooltip=[
             alt.Tooltip("aircraft_name:N", title="Aircraft"),
@@ -650,24 +653,24 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
         filled=True,
         stroke="#FFFFFF",
         strokeWidth=1.5,
-        color="#D4795B",
+        color="#d4ff00",
         opacity=1.0,
     ).encode(size=alt.Size("marker_size:Q", scale=None, legend=None))
 
     band_df = pd.DataFrame({"x0": [lower_band], "x1": [upper_band]})
-    confidence_band = alt.Chart(band_df).mark_rect(color="#D4795B", opacity=0.08).encode(x="x0:Q", x2="x1:Q")
+    confidence_band = alt.Chart(band_df).mark_rect(color="#d4ff00", opacity=0.08).encode(x="x0:Q", x2="x1:Q")
 
     rule_df = pd.DataFrame({"rcs_plot": [prediction_value], "label": [f"Estimated RCS: {prediction_value:.3e} m^2"]})
-    prediction_rule = alt.Chart(rule_df).mark_rule(color="#D4795B", strokeDash=[4, 4], strokeWidth=2.0).encode(x="rcs_plot:Q")
+    prediction_rule = alt.Chart(rule_df).mark_rule(color="#d4ff00", strokeDash=[4, 4], strokeWidth=2.0).encode(x="rcs_plot:Q")
     rule_label = (
         alt.Chart(rule_df)
         .mark_text(
             align="left",
             dx=8,
             dy=-12,
-            color="#D4795B",
+            color="#d4ff00",
             fontSize=13,
-            font="Outfit",
+            font="JetBrains Mono",
             fontWeight=600,
         )
         .encode(x="rcs_plot:Q", y=alt.value(10), text="label:N")
@@ -683,9 +686,9 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
                 fontSize=18,
                 fontWeight=600,
                 subtitleFontSize=13,
-                subtitleColor="#6A7B82",
+                subtitleColor="#8b949e",
                 offset=16,
-                color="#2C363F",
+                color="#f0f4f8",
             ),
             width="container",
         )
@@ -698,35 +701,36 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
             opacity=1.0
         )
         .configure_axis(
-            labelFont="Outfit",
-            titleFont="Playfair Display",
-            labelFontSize=12,
+            labelFont="JetBrains Mono",
+            titleFont="Chakra Petch",
+            labelFontSize=11,
             titleFontSize=13,
-            labelColor="#6A7B82",
-            titleColor="#2C363F",
-            gridOpacity=0.6,
-            gridColor="#EAEAE4",
-            gridDash=[4, 4],
+            labelColor="#8b949e",
+            titleColor="#f0f4f8",
+            gridOpacity=0.4,
+            gridColor="#242b35",
+            domainColor="#242b35",
+            tickColor="#242b35",
         )
         .configure_title(
-            font="Playfair Display",
-            subtitleFont="Outfit",
+            font="Chakra Petch",
+            subtitleFont="JetBrains Mono",
             anchor="start",
-            color="#2C363F",
-            subtitleColor="#6A7B82"
+            color="#f0f4f8",
+            subtitleColor="#8b949e"
         )
         .configure_legend(
-            labelFont="Outfit",
-            titleFont="Outfit",
+            labelFont="JetBrains Mono",
+            titleFont="Chakra Petch",
             padding=15,
-            labelFontSize=11,
+            labelFontSize=10,
             titleFontSize=12,
-            labelColor="#6A7B82",
-            titleColor="#2C363F"
+            labelColor="#8b949e",
+            titleColor="#f0f4f8"
         )
         .configure_text(
-            font="Outfit",
-            color="#2C363F"
+            font="JetBrains Mono",
+            color="#f0f4f8"
         )
         .configure_mark(
             opacity=0.9
