@@ -8,9 +8,25 @@ from torch.amp import autocast
 from torch.utils.data import DataLoader, Dataset
 
 from dataset import ImageTensorCache, build_image_transform, inverse_transform_target_tensor
-from device_utils import configure_torch_for_device, describe_device, resolve_device
+from device_utils import configure_torch_for_device, cuda_probe_failure_summary, describe_device, resolve_device
 from model import build_model, normalize_model_type
 from perf_utils import autotune_num_workers, configure_cpu_threads, format_worker_timings, parse_num_workers
+
+
+def _load_model_state_dict(model, state_dict: dict):
+    try:
+        model.load_state_dict(state_dict)
+        return
+    except RuntimeError as initial_exc:
+        has_module_prefix = any(key.startswith("module.") for key in state_dict.keys())
+        if not has_module_prefix:
+            raise
+        stripped = {key[len("module."):]: value for key, value in state_dict.items()}
+        try:
+            model.load_state_dict(stripped)
+            return
+        except RuntimeError:
+            raise initial_exc
 
 
 def load_checkpoint(checkpoint_path: str, device: torch.device):
@@ -27,7 +43,7 @@ def load_checkpoint(checkpoint_path: str, device: torch.device):
         model_type=model_type,
         model_config=model_config,
     ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    _load_model_state_dict(model, checkpoint["model_state_dict"])
     model.eval()
     transform = build_image_transform(image_size=image_size, train=False)
     return model, transform, target_mode
@@ -186,6 +202,10 @@ def main():
 
     device = resolve_device(args.device)
     configure_torch_for_device(device)
+    if device.type != "cuda" and torch.cuda.is_available():
+        details = cuda_probe_failure_summary()
+        if details:
+            print(f"[warn] CUDA detected but unusable with this Torch build. Falling back to {device}. Details: {details}")
     print(f"Using device: {describe_device(device)}")
     model, transform, target_mode = load_checkpoint(args.checkpoint, device)
 

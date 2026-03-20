@@ -16,7 +16,13 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import AircraftRCSDataset, build_image_transform, inverse_transform_target_tensor, load_image_samples
-from device_utils import configure_torch_for_device, describe_device, resolve_device
+from device_utils import (
+    configure_torch_for_device,
+    cuda_probe_failure_summary,
+    describe_device,
+    resolve_device,
+    usable_cuda_device_indices,
+)
 from model import SUPPORTED_MODEL_TYPES, build_model, normalize_model_type, resolve_model_config
 from perf_utils import autotune_num_workers, configure_cpu_threads, format_worker_timings, parse_num_workers
 import ssl
@@ -302,6 +308,38 @@ def write_quality_log(path: Path, rows: list[dict]) -> None:
     path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
 
+def unwrap_model(model):
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
+def parse_gpu_id_list(value: str, usable_ids: list[int]) -> list[int]:
+    token = value.strip().lower()
+    if token == "auto":
+        return list(usable_ids)
+
+    selected: list[int] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            idx = int(part)
+        except ValueError as exc:
+            raise ValueError(f"Invalid --gpu-ids value: {value}") from exc
+        selected.append(idx)
+
+    if not selected:
+        raise ValueError("--gpu-ids did not contain any GPU ids")
+    invalid = [idx for idx in selected if idx not in usable_ids]
+    if invalid:
+        details = cuda_probe_failure_summary()
+        raise ValueError(
+            f"Requested GPU ids are not usable with this runtime: {invalid}. "
+            f"Usable ids: {usable_ids}. Details: {details}"
+        )
+    return selected
+
+
 def save_checkpoint(
     path: str,
     model,
@@ -319,7 +357,7 @@ def save_checkpoint(
     checkpoint = {
         "epoch": epoch,
         "best_val_loss": best_val_loss,
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": unwrap_model(model).state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "image_size": image_size,
@@ -357,6 +395,19 @@ def main():
         type=str,
         default="auto",
         help="Compute device: auto|gpu|cuda|cuda:N|mps|cpu (auto prefers CUDA, then MPS, then CPU)",
+    )
+    parser.add_argument(
+        "--multi-gpu",
+        type=str,
+        default="auto",
+        choices=["auto", "off", "on"],
+        help="Use DataParallel across multiple usable CUDA GPUs (auto enables when possible).",
+    )
+    parser.add_argument(
+        "--gpu-ids",
+        type=str,
+        default="auto",
+        help='Comma-separated CUDA ids for DataParallel, e.g. "0,1" (default: auto).',
     )
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--cache-mode", type=str, default="memory", choices=["off", "memory", "disk"])
@@ -418,6 +469,10 @@ def main():
 
     device = resolve_device(args.device)
     configure_torch_for_device(device)
+    if device.type != "cuda" and torch.cuda.is_available():
+        details = cuda_probe_failure_summary()
+        if details:
+            print(f"[warn] CUDA detected but unusable with this Torch build. Falling back to {device}. Details: {details}")
     print(f"Using device: {describe_device(device)}")
     train_loader, val_loader = create_dataloaders(
         csv_path=args.csv_path,
@@ -451,6 +506,29 @@ def main():
         model_type=model_type,
         model_config=model_config,
     ).to(device)
+    if device.type == "cuda":
+        usable_ids = usable_cuda_device_indices()
+        requested_ids = parse_gpu_id_list(args.gpu_ids, usable_ids)
+        primary_idx = device.index if device.index is not None else requested_ids[0]
+        if primary_idx not in requested_ids:
+            requested_ids = [primary_idx] + [idx for idx in requested_ids if idx != primary_idx]
+        torch.cuda.set_device(primary_idx)
+        if args.multi_gpu == "on" and len(requested_ids) < 2:
+            print(f"[warn] --multi-gpu=on requested, but only one usable CUDA device found: {requested_ids}")
+
+        should_wrap_dp = (
+            args.multi_gpu == "on"
+            or (
+                args.multi_gpu == "auto"
+                and args.device.strip().lower() in {"auto", "gpu", "cuda"}
+                and len(requested_ids) > 1
+            )
+        )
+        if should_wrap_dp and len(requested_ids) > 1:
+            model = nn.DataParallel(model, device_ids=requested_ids, output_device=requested_ids[0])
+            print(f"Multi-GPU: DataParallel enabled on CUDA devices {requested_ids}")
+        else:
+            print(f"Single-GPU mode on cuda:{primary_idx} (usable CUDA devices: {usable_ids})")
     if args.loss == "hybrid":
         criterion = HybridRCSLoss(
             target_mode=args.target_mode,

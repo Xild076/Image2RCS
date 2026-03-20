@@ -63,6 +63,8 @@ Useful options:
 - `--eval-every N`: run validation every N epochs
 - `--profile`: print per-epoch timing split (`data_load`, `fwd_bwd`, `eval`, `ckpt_io`)
 - `--device auto|gpu|cuda|cuda:N|mps|cpu`: select compute backend (`auto` prefers CUDA, then Apple MPS, then CPU)
+- `--multi-gpu auto|off|on`: DataParallel on multiple usable CUDA devices (`auto` enables when possible)
+- `--gpu-ids 0,1,...|auto`: choose CUDA device ids for DataParallel
 
 ## Inference
 
