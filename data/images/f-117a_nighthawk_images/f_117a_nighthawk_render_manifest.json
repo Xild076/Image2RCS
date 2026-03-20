@@ -1,10 +1,11 @@
 {
   "azimuth_step_deg": 20,
+  "background_scene_profile": "airport_heavy",
   "center_hold_probability": 0.22,
   "cloud_max_layers": 3,
   "cloud_probability": 0.55,
   "combination_strategy": "exhaustive",
-  "combinations_per_pose": 576,
+  "combinations_per_pose": 2880,
   "combo_selection": "pairwise",
   "distance_bins": 3,
   "distance_max_scale": 1.95,
@@ -12,23 +13,82 @@
   "elevation_max_deg": 30,
   "elevation_min_deg": -30,
   "elevation_step_deg": 15,
-  "frame_count": 400,
+  "frame_count": 800,
   "frame_count_is_successful_writes": true,
-  "frame_seed": 23,
+  "frame_seed": 24,
   "mesh_path": "/Users/harry/Documents/Python_Projects/Image2RCS/data/renders/f-117a_nighthawk/f-117a_nighthawk.glb",
+  "noise_profile": "aggressive_background",
+  "noise_profile_settings": {
+    "airport_visible_probability": 0.79,
+    "artifact_prob": 0.45,
+    "artifact_strength": 0.62,
+    "background_replace_weight": 0.97,
+    "background_replace_weight_max": 1.0,
+    "background_replace_weight_min": 0.58,
+    "bg_grain_sigma": 21.0,
+    "blur_max": 1.35,
+    "color_drift": 0.17,
+    "compression_prob": 0.52,
+    "compression_quality_max": 74.0,
+    "compression_quality_min": 42.0,
+    "fg_grain_sigma": 5.5,
+    "fog_strength": 0.28,
+    "foreground_overlay_alpha": 62.0,
+    "noise_scale_max": 1.64,
+    "noise_scale_min": 0.82,
+    "structure_density": 0.82,
+    "vignette_strength": 0.19
+  },
   "offcenter_xy_scale": 0.34,
   "offcenter_z_scale": 0.2,
   "orientation_modes": [
     "upright",
-    "inverted"
+    "inverted",
+    "vertical_cw",
+    "vertical_ccw"
   ],
   "output_dir": "/Users/harry/Documents/Python_Projects/Image2RCS/data/images/f-117a_nighthawk_images",
   "output_format": "webp",
   "output_quality": 78,
-  "pose_count": 180,
+  "pose_count": 360,
   "removed_existing": 0,
   "render_size": 640,
-  "target_images_per_model": 400,
-  "updated_at": "2026-03-20T03:28:51+00:00",
+  "resolution_counts": {
+    "360x640": 160,
+    "384x512": 160,
+    "448x448": 160,
+    "512x384": 160,
+    "640x360": 160
+  },
+  "resolution_options": [
+    {
+      "height": 448,
+      "name": "448x448",
+      "width": 448
+    },
+    {
+      "height": 384,
+      "name": "512x384",
+      "width": 512
+    },
+    {
+      "height": 512,
+      "name": "384x512",
+      "width": 384
+    },
+    {
+      "height": 360,
+      "name": "640x360",
+      "width": 640
+    },
+    {
+      "height": 640,
+      "name": "360x640",
+      "width": 360
+    }
+  ],
+  "resolution_profile": "balanced_mix",
+  "target_images_per_model": 800,
+  "updated_at": "2026-03-20T17:35:27+00:00",
   "variants_per_combo": 1
 }

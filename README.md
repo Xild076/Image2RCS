@@ -37,6 +37,8 @@ python src/train.py \
   --output checkpoints/best_model.pt \
   --epochs 20 \
   --batch-size 16 \
+  --image-size 448 \
+  --model-type resnet18_se \
   --num-workers auto \
   --cache-mode disk \
   --cache-dir .cache/image2rcs \
@@ -47,6 +49,11 @@ python src/train.py \
 Useful options:
 
 - `--num-workers auto|N`: auto-tune DataLoader workers over `{0,1,2,4}`
+- `--image-size N`: model input size (default `448`)
+- `--model-type resnet18_baseline|resnet18_se`: architecture selection (`resnet18_se` default)
+- `--hidden-dim N`: regression head hidden width (default `256`)
+- `--dropout P`: regression head dropout (default `0.2`)
+- `--se-reduction N`: channel-attention squeeze ratio for `resnet18_se` (default `16`)
 - `--cache-mode off|memory|disk`: image decode cache strategy (`disk` is fastest for repeat runs)
 - `--memory-cache-items N`: cap RAM usage when `--cache-mode memory` (default `256`)
 - `--cache-dir PATH`: cache directory for disk mode
@@ -108,6 +115,9 @@ Generate dense synthetic photos from meshes in `data/renders`:
 python src/render_photos.py \
   --render-root data/renders \
   --images-root data/images \
+  --resolution-profile balanced_mix \
+  --noise-profile aggressive_background \
+  --background-scene-profile airport_heavy \
   --approval-mode interactive \
   --clean-output
 ```
@@ -122,7 +132,8 @@ Approval records and review sheets are written under `data/model_approvals`.
 
 Quality/detail controls:
 
-- `--render-size`: output image size (default `896`)
+- `--render-size`: square output size used when `--resolution-profile fixed` (default `640`)
+- `--resolution-profile`: `fixed|balanced_mix|wide_heavy|near_square` (default `balanced_mix`)
 - `--preview-size`: approval-sheet render size (default `512`)
 - `--azimuth-step`: smaller means more camera angles (default `20`)
 - `--elevation-min/--elevation-max/--elevation-step`: vertical angle sweep (default `-30..30` by `15`)
@@ -130,9 +141,10 @@ Quality/detail controls:
 
 Lighting and sky variation:
 
-- Every render cycles through sky backgrounds: `lightblue`, `duskorange`, and `black`
-- Lighting cycles through multiple positions: `left_high`, `right_high`, `front_low`, `back_rim`
-- Variants are included in output filenames for easier filtering and debugging
+- Sky/lighting combinations include multiple presets and style levels (`soft`, `neutral`, `harsh`, `bright`)
+- `--noise-profile`: `light|balanced|aggressive_background` (default `aggressive_background`)
+- `--background-scene-profile`: currently `airport_heavy` for runway/tarmac/ground-adjacent clutter
+- Render filenames and manifests include resolution metadata for downstream auditing
 
 Useful for quick validation:
 

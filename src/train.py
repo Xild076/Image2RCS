@@ -13,10 +13,11 @@ from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from dataset import AircraftRCSDataset, build_image_transform, inverse_transform_target_tensor, load_image_samples
 from device_utils import configure_torch_for_device, describe_device, resolve_device
-from model import build_model
+from model import SUPPORTED_MODEL_TYPES, build_model, normalize_model_type, resolve_model_config
 from perf_utils import autotune_num_workers, configure_cpu_threads, format_worker_timings, parse_num_workers
 import ssl
 
@@ -310,6 +311,8 @@ def save_checkpoint(
     best_val_loss: float,
     image_size: int,
     target_mode: str,
+    model_type: str,
+    model_config: dict,
     quality_snapshot: dict | None = None,
     quality_history: list[dict] | None = None,
 ):
@@ -321,6 +324,8 @@ def save_checkpoint(
         "scheduler_state_dict": scheduler.state_dict(),
         "image_size": image_size,
         "target_mode": target_mode,
+        "model_type": model_type,
+        "model_config": dict(model_config),
     }
     if quality_snapshot is not None:
         checkpoint["quality"] = quality_snapshot
@@ -340,7 +345,11 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--val-split", type=float, default=0.2)
-    parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument("--image-size", type=int, default=448)
+    parser.add_argument("--model-type", type=str, default="resnet18_se", choices=SUPPORTED_MODEL_TYPES)
+    parser.add_argument("--hidden-dim", type=int, default=256)
+    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--se-reduction", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--target-mode", type=str, default="log1p", choices=["log1p", "none"])
     parser.add_argument(
@@ -397,6 +406,12 @@ def main():
         raise ValueError("--memory-cache-items must be >= 1")
     if args.prefetch_factor < 1:
         raise ValueError("--prefetch-factor must be >= 1")
+    if args.hidden_dim < 1:
+        raise ValueError("--hidden-dim must be >= 1")
+    if not (0.0 <= args.dropout < 1.0):
+        raise ValueError("--dropout must be in [0, 1)")
+    if args.se_reduction < 1:
+        raise ValueError("--se-reduction must be >= 1")
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -422,7 +437,20 @@ def main():
         profile=args.profile,
     )
 
-    model = build_model(pretrained=not args.no_pretrained, out_dim=1).to(device)
+    model_type = normalize_model_type(args.model_type)
+    model_config = resolve_model_config(
+        model_type=model_type,
+        hidden_dim=args.hidden_dim,
+        dropout=args.dropout,
+        se_reduction=args.se_reduction,
+    )
+    print(f"Model type: {model_type} | config={model_config}")
+    model = build_model(
+        pretrained=not args.no_pretrained,
+        out_dim=1,
+        model_type=model_type,
+        model_config=model_config,
+    ).to(device)
     if args.loss == "hybrid":
         criterion = HybridRCSLoss(
             target_mode=args.target_mode,
@@ -448,7 +476,8 @@ def main():
     quality_history: list[dict] = []
     quality_log_path = output_path.with_name(f"{output_path.stem}_quality_log.json")
 
-    for epoch in range(1, args.epochs + 1):
+    
+    for epoch in tqdm(range(1, args.epochs + 1)):
         epoch_start = time.perf_counter()
         train_loss, train_stats = run_epoch(model, train_loader, criterion, optimizer, device, scaler)
 
@@ -488,6 +517,8 @@ def main():
                     best_val_loss=best_val_loss,
                     image_size=args.image_size,
                     target_mode=args.target_mode,
+                    model_type=model_type,
+                    model_config=model_config,
                     quality_snapshot=quality_record,
                     quality_history=quality_history,
                 )

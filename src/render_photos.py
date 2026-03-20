@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import hashlib
+import io
 import json
 import math
 import re
@@ -10,6 +11,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +25,8 @@ EXTENT_MARGIN = 1.45
 DEFAULT_ORIENTATION_MODES = (
     ("upright", 0.0),
     ("inverted", 180.0),
+    ("vertical_cw", 90.0),
+    ("vertical_ccw", 270.0),
 )
 SKY_PRESETS = (
     {
@@ -141,6 +145,94 @@ LIGHT_STYLE_PRESETS = (
     },
 )
 DISTANCE_LABELS = ("near", "mid", "far", "xfar", "ultra", "extreme")
+RESOLUTION_PROFILES: dict[str, tuple[tuple[int, int], ...]] = {
+    "fixed": (),
+    "balanced_mix": (
+        (448, 448),
+        (512, 384),
+        (384, 512),
+        (640, 360),
+        (360, 640),
+    ),
+    "wide_heavy": (
+        (448, 448),
+        (576, 320),
+        (320, 576),
+        (640, 360),
+        (360, 640),
+    ),
+    "near_square": (
+        (448, 448),
+        (480, 416),
+        (416, 480),
+    ),
+}
+NOISE_PROFILE_SETTINGS: dict[str, dict[str, float]] = {
+    "light": {
+        "background_replace_weight": 0.72,
+        "background_replace_weight_min": 0.35,
+        "background_replace_weight_max": 0.84,
+        "airport_visible_probability": 0.46,
+        "noise_scale_min": 0.55,
+        "noise_scale_max": 1.20,
+        "bg_grain_sigma": 8.0,
+        "fg_grain_sigma": 2.0,
+        "vignette_strength": 0.07,
+        "blur_max": 0.55,
+        "compression_prob": 0.22,
+        "compression_quality_min": 72.0,
+        "compression_quality_max": 90.0,
+        "color_drift": 0.06,
+        "fog_strength": 0.14,
+        "structure_density": 0.36,
+        "foreground_overlay_alpha": 34.0,
+        "artifact_prob": 0.18,
+        "artifact_strength": 0.28,
+    },
+    "balanced": {
+        "background_replace_weight": 0.88,
+        "background_replace_weight_min": 0.48,
+        "background_replace_weight_max": 0.94,
+        "airport_visible_probability": 0.66,
+        "noise_scale_min": 0.70,
+        "noise_scale_max": 1.38,
+        "bg_grain_sigma": 13.0,
+        "fg_grain_sigma": 3.8,
+        "vignette_strength": 0.12,
+        "blur_max": 0.9,
+        "compression_prob": 0.34,
+        "compression_quality_min": 56.0,
+        "compression_quality_max": 82.0,
+        "color_drift": 0.1,
+        "fog_strength": 0.2,
+        "structure_density": 0.56,
+        "foreground_overlay_alpha": 46.0,
+        "artifact_prob": 0.28,
+        "artifact_strength": 0.42,
+    },
+    "aggressive_background": {
+        "background_replace_weight": 0.97,
+        "background_replace_weight_min": 0.58,
+        "background_replace_weight_max": 1.0,
+        "airport_visible_probability": 0.79,
+        "noise_scale_min": 0.82,
+        "noise_scale_max": 1.64,
+        "bg_grain_sigma": 21.0,
+        "fg_grain_sigma": 5.5,
+        "vignette_strength": 0.19,
+        "blur_max": 1.35,
+        "compression_prob": 0.52,
+        "compression_quality_min": 42.0,
+        "compression_quality_max": 74.0,
+        "color_drift": 0.17,
+        "fog_strength": 0.28,
+        "structure_density": 0.82,
+        "foreground_overlay_alpha": 62.0,
+        "artifact_prob": 0.45,
+        "artifact_strength": 0.62,
+    },
+}
+BACKGROUND_SCENE_PROFILES = ("airport_heavy",)
 REVIEW_VIEW_SPECS = (
     ("front", 0, 10, 0.0),
     ("front_high", 0, 35, 0.0),
@@ -178,6 +270,9 @@ class RenderConfig:
     frame_seed: int = 23
     output_format: str = "webp"
     output_quality: int = 78
+    resolution_profile: str = "balanced_mix"
+    noise_profile: str = "aggressive_background"
+    background_scene_profile: str = "airport_heavy"
     combination_strategy: str = "exhaustive"
     variants_per_combo: int = 1
     distance_bins: int = 3
@@ -191,6 +286,19 @@ class RenderConfig:
         if self.elevation_max_deg < self.elevation_min_deg:
             raise ValueError("Elevation max must be >= elevation min.")
         return list(range(self.elevation_min_deg, self.elevation_max_deg + 1, self.elevation_step_deg))
+
+    @property
+    def resolution_options(self) -> list[tuple[str, int, int]]:
+        profile = str(self.resolution_profile).strip().lower()
+        if profile == "fixed":
+            size = int(self.render_size)
+            return [(f"{size}x{size}", size, size)]
+
+        options = RESOLUTION_PROFILES.get(profile)
+        if not options:
+            choices = ", ".join(sorted(RESOLUTION_PROFILES))
+            raise ValueError(f"Unsupported resolution profile: {self.resolution_profile}. Expected one of: {choices}")
+        return [(f"{w}x{h}", int(w), int(h)) for w, h in options]
 
 
 def canonicalize(text: str) -> str:
@@ -523,27 +631,62 @@ def build_distance_bins(render_config: RenderConfig) -> list[tuple[str, float, f
 
 def build_frame_combinations(
     render_config: RenderConfig,
-) -> list[tuple[dict, dict, dict, str, float, float, int]]:
+) -> list[tuple[dict, dict, dict, str, float, float, str, int, int, int]]:
     distance_bins = build_distance_bins(render_config)
-    combos: list[tuple[dict, dict, dict, str, float, float, int]] = []
+    resolutions = render_config.resolution_options
+    combos: list[tuple[dict, dict, dict, str, float, float, str, int, int, int]] = []
 
     if render_config.combination_strategy == "cyclic":
-        cycle_len = max(len(SKY_PRESETS), len(LIGHT_POSITION_PRESETS), len(LIGHT_STYLE_PRESETS), len(distance_bins))
+        cycle_len = max(
+            len(SKY_PRESETS),
+            len(LIGHT_POSITION_PRESETS),
+            len(LIGHT_STYLE_PRESETS),
+            len(distance_bins),
+            len(resolutions),
+        )
         for cycle_idx in range(cycle_len):
             sky = SKY_PRESETS[cycle_idx % len(SKY_PRESETS)]
             light = LIGHT_POSITION_PRESETS[cycle_idx % len(LIGHT_POSITION_PRESETS)]
             light_style = LIGHT_STYLE_PRESETS[cycle_idx % len(LIGHT_STYLE_PRESETS)]
             dist_name, dist_min, dist_max = distance_bins[cycle_idx % len(distance_bins)]
+            resolution_name, width, height = resolutions[cycle_idx % len(resolutions)]
             for variant_idx in range(render_config.variants_per_combo):
-                combos.append((sky, light, light_style, dist_name, dist_min, dist_max, variant_idx))
+                combos.append(
+                    (
+                        sky,
+                        light,
+                        light_style,
+                        dist_name,
+                        dist_min,
+                        dist_max,
+                        resolution_name,
+                        width,
+                        height,
+                        variant_idx,
+                    )
+                )
         return combos
 
     for sky in SKY_PRESETS:
         for light in LIGHT_POSITION_PRESETS:
             for light_style in LIGHT_STYLE_PRESETS:
                 for dist_name, dist_min, dist_max in distance_bins:
-                    for variant_idx in range(render_config.variants_per_combo):
-                        combos.append((sky, light, light_style, dist_name, dist_min, dist_max, variant_idx))
+                    for resolution_name, width, height in resolutions:
+                        for variant_idx in range(render_config.variants_per_combo):
+                            combos.append(
+                                (
+                                    sky,
+                                    light,
+                                    light_style,
+                                    dist_name,
+                                    dist_min,
+                                    dist_max,
+                                    resolution_name,
+                                    width,
+                                    height,
+                                    variant_idx,
+                                )
+                            )
     return combos
 
 
@@ -605,29 +748,26 @@ def build_pose_schedule(
     return schedule
 
 
-def combo_factor_keys(combo: tuple[dict, dict, dict, str, float, float, int]) -> tuple[str, str, str, str]:
-    sky, light, light_style, distance_name, _, _, _ = combo
-    return sky["name"], light["name"], light_style["name"], distance_name
+def combo_factor_keys(combo: tuple[dict, dict, dict, str, float, float, str, int, int, int]) -> tuple[str, str, str, str, str]:
+    sky, light, light_style, distance_name, _, _, resolution_name, _, _, _ = combo
+    return sky["name"], light["name"], light_style["name"], distance_name, resolution_name
 
 
-def combo_pair_keys(combo: tuple[dict, dict, dict, str, float, float, int]) -> list[tuple[str, str, str]]:
-    sky_name, light_name, style_name, distance_name = combo_factor_keys(combo)
-    return [
-        ("sky_light", sky_name, light_name),
-        ("sky_style", sky_name, style_name),
-        ("sky_distance", sky_name, distance_name),
-        ("light_style", light_name, style_name),
-        ("light_distance", light_name, distance_name),
-        ("style_distance", style_name, distance_name),
-    ]
+def combo_pair_keys(combo: tuple[dict, dict, dict, str, float, float, str, int, int, int]) -> list[tuple[str, str, str]]:
+    factor_names = ("sky", "light", "style", "distance", "resolution")
+    factor_values = combo_factor_keys(combo)
+    pairs: list[tuple[str, str, str]] = []
+    for i, j in combinations(range(len(factor_values)), 2):
+        pairs.append((f"{factor_names[i]}_{factor_names[j]}", factor_values[i], factor_values[j]))
+    return pairs
 
 
 def build_combo_schedule(
-    frame_combinations: list[tuple[dict, dict, dict, str, float, float, int]],
+    frame_combinations: list[tuple[dict, dict, dict, str, float, float, str, int, int, int]],
     total_frames: int,
     selection_mode: str,
     model_seed: int,
-) -> list[tuple[dict, dict, dict, str, float, float, int]]:
+) -> list[tuple[dict, dict, dict, str, float, float, str, int, int, int]]:
     if not frame_combinations:
         raise ValueError("No environment combinations available for scheduling.")
     if total_frames <= 0:
@@ -642,7 +782,7 @@ def build_combo_schedule(
     tie_breakers = rng.random(len(frame_combinations))
     level_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
     pair_counts: defaultdict[tuple[str, str, str], int] = defaultdict(int)
-    scheduled: list[tuple[dict, dict, dict, str, float, float, int]] = []
+    scheduled: list[tuple[dict, dict, dict, str, float, float, str, int, int, int]] = []
     last_idx = -1
 
     factor_cache = [combo_factor_keys(combo) for combo in frame_combinations]
@@ -754,6 +894,379 @@ def maybe_apply_fake_clouds(
     finally:
         overlay.close()
         base.close()
+
+
+def resolve_noise_settings(noise_profile: str) -> dict[str, float]:
+    profile = str(noise_profile).strip().lower()
+    settings = NOISE_PROFILE_SETTINGS.get(profile)
+    if settings is None:
+        choices = ", ".join(sorted(NOISE_PROFILE_SETTINGS))
+        raise ValueError(f"Unsupported noise profile: {noise_profile}. Expected one of: {choices}")
+    return settings
+
+
+def _background_mask_from_depth(depth_buffer: np.ndarray) -> np.ndarray:
+    depth = np.asarray(depth_buffer)
+    return (~np.isfinite(depth)) | (depth <= 0.0)
+
+
+def _build_airport_background(
+    width: int,
+    height: int,
+    rng: np.random.Generator,
+    settings: dict[str, float],
+) -> np.ndarray:
+    horizon = int(rng.uniform(0.38, 0.68) * height)
+    horizon = int(np.clip(horizon, max(14, int(0.2 * height)), max(16, height - 16)))
+
+    sky_top = np.array(
+        [
+            rng.uniform(86, 148),
+            rng.uniform(126, 186),
+            rng.uniform(154, 232),
+        ],
+        dtype=np.float32,
+    )
+    sky_horizon = np.array(
+        [
+            rng.uniform(164, 216),
+            rng.uniform(172, 224),
+            rng.uniform(182, 238),
+        ],
+        dtype=np.float32,
+    )
+    ground_far = np.array(
+        [
+            rng.uniform(108, 158),
+            rng.uniform(104, 148),
+            rng.uniform(92, 136),
+        ],
+        dtype=np.float32,
+    )
+    ground_near = np.array(
+        [
+            rng.uniform(58, 104),
+            rng.uniform(58, 98),
+            rng.uniform(58, 96),
+        ],
+        dtype=np.float32,
+    )
+
+    image = np.zeros((height, width, 3), dtype=np.float32)
+    if horizon > 0:
+        sky_grad = np.linspace(0.0, 1.0, num=horizon, dtype=np.float32)[:, None]
+        image[:horizon, :, :] = ((1.0 - sky_grad) * sky_top)[:, None, :] + (sky_grad * sky_horizon)[:, None, :]
+    if horizon < height:
+        ground_rows = max(height - horizon, 1)
+        ground_grad = np.linspace(0.0, 1.0, num=ground_rows, dtype=np.float32)[:, None]
+        image[horizon:, :, :] = ((1.0 - ground_grad) * ground_far)[:, None, :] + (ground_grad * ground_near)[:, None, :]
+
+    canvas = Image.fromarray(np.clip(image, 0.0, 255.0).astype(np.uint8), mode="RGB")
+    draw = ImageDraw.Draw(canvas)
+    structure_density = float(settings["structure_density"])
+
+    runway_exists = rng.random() < 0.94
+    if runway_exists and horizon < height - 4:
+        top_y = int(horizon + rng.uniform(0.03, 0.2) * max(8, height - horizon))
+        top_y = int(np.clip(top_y, horizon, height - 6))
+
+        left_top = int(width * rng.uniform(0.40, 0.48))
+        right_top = int(width * rng.uniform(0.52, 0.60))
+        left_bottom = int(width * rng.uniform(0.06, 0.24))
+        right_bottom = int(width * rng.uniform(0.76, 0.94))
+        runway_color = (
+            int(rng.integers(56, 92)),
+            int(rng.integers(56, 92)),
+            int(rng.integers(56, 94)),
+        )
+        draw.polygon(
+            [(left_bottom, height), (left_top, top_y), (right_top, top_y), (right_bottom, height)],
+            fill=runway_color,
+        )
+
+        stripe_segments = int(rng.integers(7, 14))
+        for seg_idx in range(stripe_segments):
+            t0 = seg_idx / max(stripe_segments, 1)
+            t1 = min(1.0, t0 + rng.uniform(0.03, 0.09))
+            y0 = int(height - (height - top_y) * (t0**1.15))
+            y1 = int(height - (height - top_y) * (t1**1.15))
+            y_top = min(y0, y1)
+            y_bottom = max(y0, y1)
+            if y_bottom - y_top < 1:
+                continue
+            width_scale = max(2, int((1.0 - t0) * width * 0.018))
+            x_mid = int((left_bottom + right_bottom) * 0.5)
+            stripe_color = (
+                int(rng.integers(212, 248)),
+                int(rng.integers(212, 248)),
+                int(rng.integers(208, 242)),
+            )
+            draw.rectangle(
+                [x_mid - width_scale, y_top, x_mid + width_scale, y_bottom],
+                fill=stripe_color,
+            )
+
+        taxi_line_count = int(max(1, round(2 + (3 * structure_density))))
+        for _ in range(taxi_line_count):
+            x0 = int(rng.uniform(0.12, 0.42) * width)
+            x1 = int(rng.uniform(0.58, 0.88) * width)
+            y = int(rng.uniform(top_y, height) * 0.98)
+            color = (
+                int(rng.integers(168, 232)),
+                int(rng.integers(152, 208)),
+                int(rng.integers(78, 126)),
+            )
+            draw.line([(x0, y), (x1, y)], fill=color, width=max(1, int(width * 0.0022)))
+
+    structure_count = int(max(3, round(6 + (28 * structure_density))))
+    for _ in range(structure_count):
+        struct_w = int(max(3, rng.uniform(0.01, 0.11) * width))
+        struct_h = int(max(3, rng.uniform(0.015, 0.12) * height))
+        x0 = int(rng.uniform(-0.02, 1.02) * width) - struct_w // 2
+        y_base = int(horizon + rng.uniform(-0.04, 0.09) * height)
+        y1 = int(np.clip(y_base, 0, height - 1))
+        y0 = int(np.clip(y1 - struct_h, 0, height - 1))
+        shade = int(rng.integers(34, 88))
+        draw.rectangle([x0, y0, x0 + struct_w, y1], fill=(shade, shade, shade + int(rng.integers(0, 18))))
+
+    pole_count = int(max(2, round(8 + (22 * structure_density))))
+    for _ in range(pole_count):
+        x = int(rng.uniform(0.0, 1.0) * width)
+        y_top = int(horizon + rng.uniform(-0.06, 0.02) * height)
+        y_bottom = int(horizon + rng.uniform(0.02, 0.12) * height)
+        pole_shade = int(rng.integers(24, 70))
+        draw.line([(x, y_top), (x, y_bottom)], fill=(pole_shade, pole_shade, pole_shade), width=max(1, int(width * 0.0016)))
+
+    output = np.array(canvas, dtype=np.float32)
+    canvas.close()
+
+    yy = np.arange(height, dtype=np.float32)[:, None]
+    fog_sigma = max(5.0, 0.13 * height)
+    fog_band = np.exp(-((yy - float(horizon)) ** 2) / (2.0 * (fog_sigma**2)))
+    fog_strength = float(settings["fog_strength"])
+    output = output * (1.0 - (fog_strength * fog_band[..., None])) + (255.0 * fog_strength * fog_band[..., None])
+    return np.clip(output, 0.0, 255.0).astype(np.uint8)
+
+
+def _blend_background(
+    rendered: np.ndarray,
+    synthetic_bg: np.ndarray,
+    background_mask: np.ndarray,
+    blend_weight: float,
+) -> np.ndarray:
+    source = rendered.astype(np.float32)
+    background = synthetic_bg.astype(np.float32)
+    if np.any(background_mask):
+        alpha = (background_mask.astype(np.float32) * float(blend_weight))[..., None]
+        blended = (source * (1.0 - alpha)) + (background * alpha)
+        return np.clip(blended, 0.0, 255.0).astype(np.uint8)
+    alpha = 0.14 * float(blend_weight)
+    blended = (source * (1.0 - alpha)) + (background * alpha)
+    return np.clip(blended, 0.0, 255.0).astype(np.uint8)
+
+
+def _apply_vignette(image: np.ndarray, strength: float) -> np.ndarray:
+    if strength <= 0.0:
+        return image
+    height, width = image.shape[:2]
+    yy, xx = np.mgrid[0:height, 0:width]
+    cx = (width - 1) * 0.5
+    cy = (height - 1) * 0.5
+    nx = (xx - cx) / max(cx, 1.0)
+    ny = (yy - cy) / max(cy, 1.0)
+    radius = np.sqrt(nx**2 + ny**2)
+    vignette = 1.0 - (strength * np.clip(radius, 0.0, 1.6) ** 1.65)
+    out = image.astype(np.float32) * vignette[..., None]
+    return np.clip(out, 0.0, 255.0).astype(np.uint8)
+
+
+def _apply_foreground_overlay(
+    image: np.ndarray,
+    rng: np.random.Generator,
+    alpha_cap: float,
+) -> np.ndarray:
+    if alpha_cap <= 0.0:
+        return image
+
+    base = Image.fromarray(image).convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    width, height = base.size
+    draw = ImageDraw.Draw(overlay, "RGBA")
+
+    streaks = int(rng.integers(2, 6))
+    for _ in range(streaks):
+        x0 = int(rng.uniform(-0.2, 1.2) * width)
+        y0 = int(rng.uniform(0.0, 1.0) * height)
+        x1 = int(rng.uniform(-0.2, 1.2) * width)
+        y1 = int(y0 + rng.uniform(-0.18, 0.18) * height)
+        alpha = int(min(255, max(0, rng.uniform(0.12, 0.45) * alpha_cap)))
+        tone = int(rng.integers(120, 220))
+        draw.line([(x0, y0), (x1, y1)], fill=(tone, tone, tone, alpha), width=max(1, int(width * rng.uniform(0.002, 0.007))))
+
+    speck_count = int(rng.integers(20, 72))
+    for _ in range(speck_count):
+        cx = int(rng.uniform(0.0, 1.0) * width)
+        cy = int(rng.uniform(0.0, 1.0) * height)
+        r = int(max(1, rng.uniform(0.0015, 0.008) * min(width, height)))
+        alpha = int(min(255, max(0, rng.uniform(0.08, 0.35) * alpha_cap)))
+        tone = int(rng.integers(94, 236))
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(tone, tone, tone, alpha))
+
+    blur_radius = float(rng.uniform(0.6, 2.2))
+    soft_overlay = overlay.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+    try:
+        merged = Image.alpha_composite(base, soft_overlay).convert("RGB")
+        output = np.array(merged, dtype=np.uint8)
+        merged.close()
+        return output
+    finally:
+        soft_overlay.close()
+        overlay.close()
+        base.close()
+
+
+def _apply_codec_artifacts(
+    image: np.ndarray,
+    rng: np.random.Generator,
+    settings: dict[str, float],
+) -> np.ndarray:
+    if float(rng.random()) > float(settings["compression_prob"]):
+        return image
+    quality = int(
+        rng.uniform(
+            float(settings["compression_quality_min"]),
+            float(settings["compression_quality_max"]),
+        )
+    )
+    quality = int(np.clip(quality, 20, 95))
+    buffer = io.BytesIO()
+    source = Image.fromarray(image)
+    decoded = None
+    try:
+        source.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+        buffer.seek(0)
+        decoded = Image.open(buffer).convert("RGB")
+        return np.array(decoded, dtype=np.uint8)
+    finally:
+        if decoded is not None:
+            decoded.close()
+        source.close()
+        buffer.close()
+
+
+def apply_background_and_noise(
+    color_buffer: np.ndarray,
+    depth_buffer: np.ndarray,
+    rng: np.random.Generator,
+    render_config: RenderConfig,
+) -> np.ndarray:
+    settings = resolve_noise_settings(render_config.noise_profile)
+    profile = str(render_config.background_scene_profile).strip().lower()
+    if profile not in BACKGROUND_SCENE_PROFILES:
+        choices = ", ".join(BACKGROUND_SCENE_PROFILES)
+        raise ValueError(f"Unsupported background scene profile: {render_config.background_scene_profile}. Expected one of: {choices}")
+
+    height, width = color_buffer.shape[:2]
+    background_mask = _background_mask_from_depth(depth_buffer)
+    noise_scale = float(
+        rng.uniform(
+            float(settings["noise_scale_min"]),
+            float(settings["noise_scale_max"]),
+        )
+    )
+    airport_visible_probability = float(np.clip(settings["airport_visible_probability"], 0.0, 1.0))
+    airport_visible = bool(float(rng.random()) <= airport_visible_probability)
+
+    output = color_buffer.copy()
+    if airport_visible:
+        synthetic_bg = _build_airport_background(width=width, height=height, rng=rng, settings=settings)
+        blend_min = float(settings["background_replace_weight_min"])
+        blend_max = float(settings["background_replace_weight_max"])
+        sampled_blend = float(rng.uniform(blend_min, blend_max))
+        blend_weight = float(np.clip(sampled_blend * (0.82 + (0.28 * noise_scale)), 0.0, 1.0))
+        output = _blend_background(
+            rendered=color_buffer,
+            synthetic_bg=synthetic_bg,
+            background_mask=background_mask,
+            blend_weight=blend_weight,
+        )
+
+    cloud_prob_scale = float(np.clip(0.48 + (0.52 * noise_scale) + rng.uniform(-0.16, 0.22), 0.15, 1.35))
+    cloud_probability = float(np.clip(render_config.cloud_probability * cloud_prob_scale, 0.0, 1.0))
+    output = maybe_apply_fake_clouds(
+        color_buffer=output,
+        rng=rng,
+        cloud_probability=cloud_probability,
+        cloud_max_layers=render_config.cloud_max_layers,
+    )
+
+    output_f = output.astype(np.float32)
+    bg_sigma = float(settings["bg_grain_sigma"]) * noise_scale
+    fg_sigma = float(settings["fg_grain_sigma"]) * (0.72 + (0.38 * noise_scale))
+    bg_noise = rng.normal(0.0, bg_sigma, size=output_f.shape).astype(np.float32)
+    fg_noise = rng.normal(0.0, fg_sigma, size=output_f.shape).astype(np.float32)
+    if np.any(background_mask):
+        mask = background_mask[..., None].astype(np.float32)
+        output_f = output_f + (mask * bg_noise) + ((1.0 - mask) * fg_noise)
+    else:
+        output_f = output_f + (0.65 * bg_noise)
+
+    color_drift = float(settings["color_drift"]) * (0.70 + (0.45 * noise_scale))
+    drift_factors = np.array(
+        [
+            rng.uniform(1.0 - color_drift, 1.0 + color_drift),
+            rng.uniform(1.0 - color_drift, 1.0 + color_drift),
+            rng.uniform(1.0 - color_drift, 1.0 + color_drift),
+        ],
+        dtype=np.float32,
+    )
+    output_f = output_f * drift_factors[None, None, :]
+    output = np.clip(output_f, 0.0, 255.0).astype(np.uint8)
+
+    artifact_prob = float(np.clip(float(settings["artifact_prob"]) * (0.65 + (0.55 * noise_scale)), 0.0, 1.0))
+    artifact_strength = float(settings["artifact_strength"]) * (0.72 + (0.52 * noise_scale))
+    if float(rng.random()) < artifact_prob:
+        base = Image.fromarray(output).convert("RGB")
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay, "RGBA")
+        line_count = int(rng.integers(5, 22))
+        for _ in range(line_count):
+            y = int(rng.uniform(0.0, 1.0) * height)
+            alpha = int(min(255, 255.0 * artifact_strength * rng.uniform(0.05, 0.22)))
+            tone = int(rng.integers(90, 210))
+            draw.line([(0, y), (width, y)], fill=(tone, tone, tone, alpha), width=max(1, int(height * 0.0014)))
+        merged = Image.alpha_composite(base.convert("RGBA"), overlay).convert("RGB")
+        output = np.array(merged, dtype=np.uint8)
+        merged.close()
+        overlay.close()
+        base.close()
+
+    foreground_alpha = float(settings["foreground_overlay_alpha"]) * (0.70 + (0.55 * noise_scale))
+    output = _apply_foreground_overlay(output, rng=rng, alpha_cap=foreground_alpha)
+    blur_max = float(settings["blur_max"]) * (0.75 + (0.55 * noise_scale))
+    blur_radius = float(rng.uniform(0.0, blur_max))
+    if blur_radius > 0.08:
+        blurred = Image.fromarray(output).filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        output = np.array(blurred, dtype=np.uint8)
+        blurred.close()
+    codec_settings = dict(settings)
+    codec_settings["compression_prob"] = float(
+        np.clip(float(settings["compression_prob"]) * (0.55 + (0.55 * noise_scale)), 0.0, 1.0)
+    )
+    quality_shift = (noise_scale - 1.0) * 15.0
+    codec_settings["compression_quality_min"] = float(
+        np.clip(float(settings["compression_quality_min"]) - quality_shift, 20.0, 95.0)
+    )
+    codec_settings["compression_quality_max"] = float(
+        np.clip(float(settings["compression_quality_max"]) - (0.7 * quality_shift), 20.0, 95.0)
+    )
+    if codec_settings["compression_quality_max"] < codec_settings["compression_quality_min"]:
+        codec_settings["compression_quality_max"] = codec_settings["compression_quality_min"]
+    output = _apply_codec_artifacts(output, rng=rng, settings=codec_settings)
+    vignette_strength = float(settings["vignette_strength"]) * (0.72 + (0.52 * noise_scale))
+    output = _apply_vignette(output, strength=vignette_strength)
+    return output
 
 
 def release_scene(scene: pyrender.Scene | None) -> None:
@@ -1156,15 +1669,23 @@ def write_render_manifest(
     frame_count: int,
     removed_existing: int,
     render_config: RenderConfig,
+    resolution_counts: dict[str, int],
 ) -> None:
     pose_count = len(build_pose_grid(render_config))
     combinations_per_pose = len(build_frame_combinations(render_config))
+    resolution_options = [
+        {"name": name, "width": width, "height": height}
+        for name, width, height in render_config.resolution_options
+    ]
     payload = {
         "mesh_path": str(mesh_path),
         "output_dir": str(output_dir),
         "frame_count": frame_count,
         "removed_existing": removed_existing,
         "render_size": render_config.render_size,
+        "resolution_profile": render_config.resolution_profile,
+        "resolution_options": resolution_options,
+        "resolution_counts": dict(sorted(resolution_counts.items())),
         "azimuth_step_deg": render_config.azimuth_step_deg,
         "elevation_min_deg": render_config.elevation_min_deg,
         "elevation_max_deg": render_config.elevation_max_deg,
@@ -1180,6 +1701,9 @@ def write_render_manifest(
         "frame_seed": render_config.frame_seed,
         "output_format": render_config.output_format,
         "output_quality": render_config.output_quality,
+        "noise_profile": render_config.noise_profile,
+        "noise_profile_settings": resolve_noise_settings(render_config.noise_profile),
+        "background_scene_profile": render_config.background_scene_profile,
         "combination_strategy": render_config.combination_strategy,
         "variants_per_combo": render_config.variants_per_combo,
         "distance_bins": render_config.distance_bins,
@@ -1191,6 +1715,25 @@ def write_render_manifest(
         "updated_at": utc_now_iso(),
     }
     write_json(manifest_path, payload)
+
+
+def estimate_frame_counts(render_config: RenderConfig, model_count: int) -> dict[str, int]:
+    pose_count = len(build_pose_grid(render_config))
+    combination_count = len(build_frame_combinations(render_config))
+    all_combos_per_model = int(pose_count * combination_count)
+    if render_config.target_images_per_model > 0:
+        planned_per_model = int(min(render_config.target_images_per_model, all_combos_per_model))
+    else:
+        planned_per_model = all_combos_per_model
+    models = int(max(0, model_count))
+    return {
+        "pose_count": int(pose_count),
+        "combination_count": int(combination_count),
+        "all_combos_per_model": all_combos_per_model,
+        "planned_per_model": planned_per_model,
+        "all_combos_total": int(all_combos_per_model * models),
+        "planned_total": int(planned_per_model * models),
+    }
 
 
 def render_one_mesh(
@@ -1234,6 +1777,7 @@ def render_one_mesh(
     frame_idx = 0
     generated_paths: list[Path] = []
     skipped_render_frames = 0
+    resolution_counts: defaultdict[str, int] = defaultdict(int)
     for force_untextured in (False, True):
         scene: pyrender.Scene | None = None
         camera = None
@@ -1244,22 +1788,28 @@ def render_one_mesh(
 
         frame_idx = 0
         generated_paths.clear()
+        resolution_counts.clear()
         try:
             scene, mesh_center, mesh_extents, base_radius, camera_yfov = build_scene(
                 mesh_path,
                 force_untextured=force_untextured,
             )
             camera = pyrender.PerspectiveCamera(yfov=camera_yfov)
-            renderer = pyrender.OffscreenRenderer(
-                viewport_width=render_config.render_size,
-                viewport_height=render_config.render_size,
-            )
             camera_node = scene.add(camera, pose=np.eye(4))
+            if combo_schedule:
+                _, _, _, _, _, _, _, initial_width, initial_height, _ = combo_schedule[0]
+            else:
+                initial_width = render_config.render_size
+                initial_height = render_config.render_size
+            renderer = pyrender.OffscreenRenderer(
+                viewport_width=int(initial_width),
+                viewport_height=int(initial_height),
+            )
 
             for frame_idx, ((orientation_name, roll_deg, azimuth_deg, elevation_deg), combo) in enumerate(
                 zip(pose_schedule, combo_schedule)
             ):
-                sky, light, light_style, distance_name, dist_min, dist_max, variant_idx = combo
+                sky, light, light_style, distance_name, dist_min, dist_max, resolution_name, width, height, variant_idx = combo
                 rng = frame_rng(model_seed=model_seed, frame_index=frame_idx)
                 phase = (2.0 * math.pi * frame_idx) / max(total_frames - 1, 1)
                 distance_scale, target_bias = sample_frame_variant(
@@ -1296,8 +1846,10 @@ def render_one_mesh(
                     continue
 
                 scene.set_pose(camera_node, pose=cam_pose)
+                renderer.viewport_width = int(width)
+                renderer.viewport_height = int(height)
                 try:
-                    color, _ = renderer.render(scene)
+                    color, depth = renderer.render(scene)
                 except Exception as exc:
                     if not is_eigenvalue_convergence_error(exc):
                         raise
@@ -1333,23 +1885,24 @@ def render_one_mesh(
 
                     scene.set_pose(camera_node, pose=safe_pose)
                     try:
-                        color, _ = renderer.render(scene)
+                        color, depth = renderer.render(scene)
                     except Exception as retry_exc:
                         if not is_eigenvalue_convergence_error(retry_exc):
                             raise
                         skipped_render_frames += 1
                         continue
 
-                color = maybe_apply_fake_clouds(
+                color = apply_background_and_noise(
                     color_buffer=color,
+                    depth_buffer=depth,
                     rng=rng,
-                    cloud_probability=render_config.cloud_probability,
-                    cloud_max_layers=render_config.cloud_max_layers,
+                    render_config=render_config,
                 )
 
                 filename = (
                     f"{prefix}{orientation_name}_"
-                    f"{sky['name']}_{light['name']}_{light_style['name']}_{distance_name}_v{variant_idx:02d}_"
+                    f"{sky['name']}_{light['name']}_{light_style['name']}_{distance_name}_{resolution_name}_"
+                    f"v{variant_idx:02d}_"
                     f"az{azimuth_deg:03d}_el{elevation_deg:+03d}_{frame_idx:05d}{extension}"
                 )
                 out_path = output_dir / filename
@@ -1359,8 +1912,10 @@ def render_one_mesh(
                     output_format=render_config.output_format,
                     output_quality=render_config.output_quality,
                 )
+                resolution_counts[f"{int(width)}x{int(height)}"] += 1
                 generated_paths.append(out_path)
                 del color
+                del depth
                 if render_config.gc_every_frames > 0 and (frame_idx + 1) % render_config.gc_every_frames == 0:
                     gc.collect()
             frame_idx = len(generated_paths)
@@ -1378,7 +1933,6 @@ def render_one_mesh(
             safe_remove_node(scene, fill_node)
             if renderer is not None:
                 renderer.delete()
-                del renderer
             release_scene(scene)
             del scene
             del camera
@@ -1392,6 +1946,7 @@ def render_one_mesh(
         frame_count=frame_idx,
         removed_existing=removed_existing,
         render_config=render_config,
+        resolution_counts=dict(resolution_counts),
     )
 
     print(
@@ -1414,6 +1969,27 @@ def parse_args() -> argparse.Namespace:
         help="Folder where approval records and review sheets are stored.",
     )
     parser.add_argument("--render-size", type=int, default=640, help="Render side length in pixels.")
+    parser.add_argument(
+        "--resolution-profile",
+        type=str,
+        default="balanced_mix",
+        choices=tuple(sorted(RESOLUTION_PROFILES.keys())),
+        help="Render resolution schedule profile; fixed uses --render-size, others include non-square frames.",
+    )
+    parser.add_argument(
+        "--noise-profile",
+        type=str,
+        default="aggressive_background",
+        choices=tuple(sorted(NOISE_PROFILE_SETTINGS.keys())),
+        help="Noise strength profile applied after rendering.",
+    )
+    parser.add_argument(
+        "--background-scene-profile",
+        type=str,
+        default="airport_heavy",
+        choices=BACKGROUND_SCENE_PROFILES,
+        help="Synthetic background scene mix used during post-processing.",
+    )
     parser.add_argument(
         "--output-format",
         type=str,
@@ -1472,7 +2048,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-images-per-model",
         type=int,
-        default=400,
+        default=800,
         help="Target render count per model (0 means full pose x combination expansion).",
     )
     parser.add_argument(
@@ -1532,7 +2108,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed",
         type=int,
-        default=23,
+        default=24,
         help="Base seed for deterministic random frame variations.",
     )
     parser.add_argument(
@@ -1593,6 +2169,22 @@ def main() -> None:
         raise ValueError("--distance-bins must be >= 1")
     if args.target_images_per_model < 0:
         raise ValueError("--target-images-per-model must be >= 0")
+    if args.resolution_profile == "fixed" and args.render_size < 64:
+        raise ValueError("--render-size must be >= 64 when --resolution-profile=fixed")
+
+    # Validate non-fixed resolution profiles early so CLI feedback is immediate.
+    dummy_cfg = RenderConfig(
+        render_size=args.render_size,
+        azimuth_step_deg=args.azimuth_step,
+        elevation_min_deg=args.elevation_min,
+        elevation_max_deg=args.elevation_max,
+        elevation_step_deg=args.elevation_step,
+        resolution_profile=args.resolution_profile,
+        noise_profile=args.noise_profile,
+        background_scene_profile=args.background_scene_profile,
+    )
+    _ = dummy_cfg.resolution_options
+    _ = resolve_noise_settings(args.noise_profile)
 
     if args.auto_approve_all_first and args.approval_mode != "off":
         newly_approved, already_approved = bulk_auto_approve(
@@ -1624,11 +2216,23 @@ def main() -> None:
         frame_seed=args.seed,
         output_format=output_format,
         output_quality=args.output_quality,
+        resolution_profile=args.resolution_profile,
+        noise_profile=args.noise_profile,
+        background_scene_profile=args.background_scene_profile,
         combination_strategy=args.combination_strategy,
         combo_selection=args.combo_selection,
         variants_per_combo=args.variants_per_combo,
         distance_bins=args.distance_bins,
         target_images_per_model=args.target_images_per_model,
+    )
+    estimates = estimate_frame_counts(render_config=render_config, model_count=len(mesh_paths))
+    print(
+        "[estimate] "
+        f"poses={estimates['pose_count']} combos={estimates['combination_count']} "
+        f"all_per_model={estimates['all_combos_per_model']:,} "
+        f"planned_per_model={estimates['planned_per_model']:,} "
+        f"all_total={estimates['all_combos_total']:,} "
+        f"planned_total={estimates['planned_total']:,}"
     )
     images_index = build_existing_images_index(images_root)
 

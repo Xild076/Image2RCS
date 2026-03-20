@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from dataset import ImageTensorCache, build_image_transform, inverse_transform_target_tensor
 from device_utils import configure_torch_for_device, describe_device, resolve_device
-from model import build_model
+from model import build_model, normalize_model_type
 from perf_utils import autotune_num_workers, configure_cpu_threads, format_worker_timings, parse_num_workers
 
 
@@ -17,7 +17,16 @@ def load_checkpoint(checkpoint_path: str, device: torch.device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     target_mode = checkpoint.get("target_mode", "log1p")
     image_size = int(checkpoint.get("image_size", 224))
-    model = build_model(pretrained=False, out_dim=1).to(device)
+    model_type = normalize_model_type(checkpoint.get("model_type", "resnet18_baseline"))
+    model_config = checkpoint.get("model_config", {})
+    if not isinstance(model_config, dict):
+        model_config = {}
+    model = build_model(
+        pretrained=False,
+        out_dim=1,
+        model_type=model_type,
+        model_config=model_config,
+    ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     transform = build_image_transform(image_size=image_size, train=False)
