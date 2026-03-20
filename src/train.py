@@ -1,5 +1,7 @@
 import argparse
 from collections import defaultdict
+from datetime import datetime, timezone
+import json
 import random
 import time
 from pathlib import Path
@@ -272,7 +274,45 @@ def evaluate(model, loader, criterion, device, target_mode: str):
     return avg_loss, avg_mae, stats
 
 
-def save_checkpoint(path: str, model, optimizer, scheduler, epoch: int, best_val_loss: float, image_size: int, target_mode: str):
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def build_quality_record(
+    epoch: int,
+    train_loss: float,
+    val_loss: float,
+    val_mae: float,
+    best_val_loss: float,
+    learning_rate: float,
+) -> dict:
+    return {
+        "epoch": int(epoch),
+        "train_loss": float(train_loss),
+        "val_loss": float(val_loss),
+        "val_mae_m2": float(val_mae),
+        "best_val_loss": float(best_val_loss),
+        "learning_rate": float(learning_rate),
+        "updated_at": utc_now_iso(),
+    }
+
+
+def write_quality_log(path: Path, rows: list[dict]) -> None:
+    path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+
+
+def save_checkpoint(
+    path: str,
+    model,
+    optimizer,
+    scheduler,
+    epoch: int,
+    best_val_loss: float,
+    image_size: int,
+    target_mode: str,
+    quality_snapshot: dict | None = None,
+    quality_history: list[dict] | None = None,
+):
     checkpoint = {
         "epoch": epoch,
         "best_val_loss": best_val_loss,
@@ -282,6 +322,10 @@ def save_checkpoint(path: str, model, optimizer, scheduler, epoch: int, best_val
         "image_size": image_size,
         "target_mode": target_mode,
     }
+    if quality_snapshot is not None:
+        checkpoint["quality"] = quality_snapshot
+    if quality_history is not None:
+        checkpoint["quality_history"] = quality_history
     torch.save(checkpoint, path)
 
 
@@ -401,6 +445,8 @@ def main():
 
     best_val_loss = float("inf")
     profile_rows: list[dict[str, float]] = []
+    quality_history: list[dict] = []
+    quality_log_path = output_path.with_name(f"{output_path.stem}_quality_log.json")
 
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.perf_counter()
@@ -418,6 +464,17 @@ def main():
             val_loss, val_mae, eval_stats = evaluate(model, val_loader, criterion, device, args.target_mode)
             eval_total_time = time.perf_counter() - eval_start
             scheduler.step(val_loss)
+            learning_rate = float(optimizer.param_groups[0]["lr"])
+            quality_record = build_quality_record(
+                epoch=epoch,
+                train_loss=train_loss,
+                val_loss=val_loss,
+                val_mae=val_mae,
+                best_val_loss=min(best_val_loss, val_loss),
+                learning_rate=learning_rate,
+            )
+            quality_history.append(quality_record)
+            write_quality_log(quality_log_path, quality_history)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -431,6 +488,8 @@ def main():
                     best_val_loss=best_val_loss,
                     image_size=args.image_size,
                     target_mode=args.target_mode,
+                    quality_snapshot=quality_record,
+                    quality_history=quality_history,
                 )
                 checkpoint_io_time = time.perf_counter() - checkpoint_start
 
@@ -481,6 +540,8 @@ def main():
         print("No validation was run; no checkpoint saved.")
     else:
         print(f"Saved best checkpoint to {output_path} with val_loss={best_val_loss:.6f}")
+    if quality_history:
+        print(f"Saved checkpoint quality log to {quality_log_path}")
 
 
 if __name__ == "__main__":

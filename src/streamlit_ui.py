@@ -129,25 +129,25 @@ def inject_styles() -> None:
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
 
         :root {
-            --bg-color: #f0f4f8;
-            --panel-bg: #ffffff;
-            --text-main: #0f172a;
-            --text-muted: #475569;
-            --text-light: #64748b;
-            --border: #cbd5e1;
-            --border-light: #e2e8f0;
-            --accent: #0f172a;
-            --accent-hover: #1e293b;
-            --accent-blue: #0284c7;
+            --bg-color: #f4f6fb;
+            --panel-bg: rgba(255, 255, 255, 0.88);
+            --text-main: #0b1728;
+            --text-muted: #384a61;
+            --text-light: #5f7390;
+            --border: #bfd0e6;
+            --border-light: #d8e2ef;
+            --accent: #0f2443;
+            --accent-hover: #18345f;
+            --accent-blue: #0ea5e9;
             --predict: #ea580c;
-            --predict-soft: #fed7aa;
+            --predict-soft: #ffedd5;
             --chart-bg: #ffffff;
-            --chart-grid: #f1f5f9;
-            --shadow-subtle: 0 2px 8px rgba(0, 0, 0, 0.06);
-            --shadow-floating: 0 8px 16px rgba(0, 0, 0, 0.1);
+            --chart-grid: #e6eef8;
+            --shadow-subtle: 0 8px 20px rgba(15, 36, 67, 0.08);
+            --shadow-floating: 0 20px 45px rgba(15, 36, 67, 0.14);
         }
 
         * { box-sizing: border-box; }
@@ -159,8 +159,10 @@ def inject_styles() -> None:
         }
 
         .stApp {
-            background-color: var(--bg-color);
-            font-family: 'Inter', sans-serif;
+            background: radial-gradient(1200px 600px at -10% -20%, #dbeafe 0%, transparent 55%),
+                        radial-gradient(900px 500px at 110% 0%, #fde68a 0%, transparent 45%),
+                        var(--bg-color);
+            font-family: 'Sora', sans-serif;
             color: var(--text-main);
         }
 
@@ -171,7 +173,9 @@ def inject_styles() -> None:
         }
         
         [data-testid="stAppViewContainer"] {
-            background-color: var(--bg-color);
+            background: radial-gradient(1200px 600px at -10% -20%, #dbeafe 0%, transparent 55%),
+                        radial-gradient(900px 500px at 110% 0%, #fde68a 0%, transparent 45%),
+                        var(--bg-color);
         }
         
         /* Column and container spacing */
@@ -185,8 +189,8 @@ def inject_styles() -> None:
 
         /* Hero Container */
         .hero {
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-            border-radius: 20px;
+            background: linear-gradient(120deg, #0f172a 0%, #1e3a8a 40%, #0ea5e9 100%);
+            border-radius: 24px;
             padding: 3rem 4rem;
             color: #ffffff;
             box-shadow: var(--shadow-floating);
@@ -197,14 +201,16 @@ def inject_styles() -> None:
             flex-direction: column;
             align-items: center;
             text-align: center;
-            border: 1px solid rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.22);
         }
         .hero::before {
             content: "";
             position: absolute;
             top: -50%; left: -50%;
             width: 200%; height: 200%;
-            background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.05) 0%, transparent 40%);
+            background:
+                radial-gradient(circle at 30% 35%, rgba(255, 255, 255, 0.24) 0%, transparent 42%),
+                radial-gradient(circle at 72% 58%, rgba(255, 237, 213, 0.26) 0%, transparent 40%);
             pointer-events: none;
         }
         .hero-eyebrow {
@@ -212,14 +218,14 @@ def inject_styles() -> None:
             margin-bottom: 1.2rem;
             padding: 0.35rem 1rem;
             border-radius: 100px;
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.2);
             backdrop-filter: blur(10px);
             font-size: 0.8rem;
             font-weight: 600;
             letter-spacing: 0.08em;
             text-transform: uppercase;
-            color: #e0f2fe;
-            border: 1px solid rgba(255, 255, 255, 0.15);
+            color: #eff6ff;
+            border: 1px solid rgba(255, 255, 255, 0.3);
             z-index: 1;
         }
         .hero h1 {
@@ -244,9 +250,10 @@ def inject_styles() -> None:
         /* Sleek White Panels */
         .panel {
             background: var(--panel-bg);
-            border-radius: 20px;
+            border-radius: 22px;
             padding: 2rem 2.2rem;
-            border: 1px solid var(--border-light);
+            border: 1px solid rgba(255, 255, 255, 0.75);
+            backdrop-filter: blur(12px);
             box-shadow: var(--shadow-subtle);
             transition: box-shadow 0.3s ease, transform 0.3s ease, border-color 0.3s ease;
             position: relative;
@@ -254,7 +261,7 @@ def inject_styles() -> None:
         .panel:hover {
             box-shadow: var(--shadow-floating);
             transform: translateY(-1px);
-            border-color: var(--border);
+            border-color: #bfdbfe;
         }
 
         .section-kicker {
@@ -279,8 +286,8 @@ def inject_styles() -> None:
 
         /* Sidebar Styling */
         [data-testid="stSidebar"] {
-            background: #ffffff;
-            border-right: 1px solid var(--border-light);
+            background: rgba(255, 255, 255, 0.9);
+            border-right: 1px solid #dbe8f6;
         }
         [data-testid="stSidebar"] .block-container {
             padding-top: 1.2rem;
@@ -307,8 +314,8 @@ def inject_styles() -> None:
 
         /* Metric Cards */
         [data-testid="stMetric"] {
-            background: #ffffff;
-            border: 1px solid var(--border-light);
+            background: rgba(255, 255, 255, 0.93);
+            border: 1px solid #d8e2ef;
             border-radius: 16px;
             padding: 1.5rem;
             transition: all 0.2s ease;
@@ -327,8 +334,8 @@ def inject_styles() -> None:
         [data-testid="stMetric"]:hover {
             transform: translateY(-2px);
             box-shadow: var(--shadow-floating);
-            border-color: var(--border);
-            background: #f8fbff;
+            border-color: #bfdbfe;
+            background: #eef6ff;
         }
         [data-testid="stMetric"]:hover::before {
             background: var(--accent-blue);
@@ -364,17 +371,17 @@ def inject_styles() -> None:
         }
         
         .stButton > button[kind="primary"] {
-            background: var(--accent) !important;
+            background: linear-gradient(90deg, #0f2443 0%, #1d4ed8 100%) !important;
             color: white !important;
             border: none !important;
             padding: 1.2rem !important;
             font-size: 1.05rem !important;
-            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.15) !important;
+            box-shadow: 0 8px 18px rgba(29, 78, 216, 0.25) !important;
         }
         .stButton > button[kind="primary"]:hover {
             transform: translateY(-2px) !important;
-            box-shadow: 0 6px 12px rgba(15, 23, 42, 0.25) !important;
-            background: var(--accent-hover) !important;
+            box-shadow: 0 12px 22px rgba(29, 78, 216, 0.34) !important;
+            background: linear-gradient(90deg, #18345f 0%, #1e40af 100%) !important;
         }
         .stButton > button[kind="secondary"] {
             background: #f1f5f9 !important;
@@ -385,8 +392,8 @@ def inject_styles() -> None:
         /* Native image/chart shells */
         [data-testid="stImage"] {
             border-radius: 16px;
-            border: 1px solid var(--border-light);
-            background: #ffffff;
+            border: 1px solid #d6e3f3;
+            background: rgba(255, 255, 255, 0.93);
             padding: 0.6rem;
             margin: 0.65rem 0 0.95rem;
             box-shadow: var(--shadow-subtle);
@@ -394,8 +401,8 @@ def inject_styles() -> None:
 
         /* Altair Chart Container */
         [data-testid="stVegaLiteChart"] {
-            background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%) !important;
-            border: 1px solid #dbeafe;
+            background: linear-gradient(180deg, #ffffff 0%, #f1f6fd 100%) !important;
+            border: 1px solid #bfdbfe;
             border-radius: 16px;
             padding: 1rem;
             margin: 1rem 0 0.7rem;
@@ -403,7 +410,7 @@ def inject_styles() -> None:
         }
         
         .vega-embed {
-            background: #ffffff !important;
+            background: #fefefe !important;
             color: #0f172a !important;
         }
 
@@ -556,7 +563,7 @@ def inject_styles() -> None:
         input, select, textarea {
             border-radius: 10px !important;
             border-color: var(--border-light) !important;
-            font-family: 'Inter', sans-serif !important;
+            font-family: 'Sora', sans-serif !important;
             color: #334155 !important;
         }
         input::placeholder, select::placeholder, textarea::placeholder {
@@ -853,8 +860,8 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
             opacity=1.0
         )
         .configure_axis(
-            labelFont="Inter, sans-serif",
-            titleFont="Inter, sans-serif",
+            labelFont="Sora, sans-serif",
+            titleFont="Sora, sans-serif",
             labelFontSize=12,
             titleFontSize=13,
             labelColor="#334155",
@@ -863,15 +870,15 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
             gridColor="#e5e7eb"
         )
         .configure_title(
-            font="Inter, sans-serif",
-            subtitleFont="Inter, sans-serif",
+            font="Sora, sans-serif",
+            subtitleFont="Sora, sans-serif",
             anchor="start",
             color="#0f172a",
             subtitleColor="#475569"
         )
         .configure_legend(
-            labelFont="Inter, sans-serif",
-            titleFont="Inter, sans-serif",
+            labelFont="Sora, sans-serif",
+            titleFont="Sora, sans-serif",
             padding=15,
             labelFontSize=11,
             titleFontSize=12,
@@ -879,7 +886,7 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
             titleColor="#0f172a"
         )
         .configure_text(
-            font="Inter, sans-serif",
+            font="Sora, sans-serif",
             color="#0f172a"
         )
         .configure_mark(

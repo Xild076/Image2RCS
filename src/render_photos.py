@@ -7,6 +7,7 @@ import json
 import math
 import re
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -139,6 +140,7 @@ LIGHT_STYLE_PRESETS = (
         "fill_scale": 1.24,
     },
 )
+DISTANCE_LABELS = ("near", "mid", "far", "xfar", "ultra", "extreme")
 REVIEW_VIEW_SPECS = (
     ("front", 0, 10, 0.0),
     ("front_high", 0, 35, 0.0),
@@ -166,8 +168,8 @@ class RenderConfig:
     extent_margin: float = EXTENT_MARGIN
     gc_every_frames: int = 40
     orientation_modes: tuple[tuple[str, float], ...] = DEFAULT_ORIENTATION_MODES
-    distance_min_scale: float = 0.78
-    distance_max_scale: float = 1.45
+    distance_min_scale: float = 0.55
+    distance_max_scale: float = 1.95
     offcenter_xy_scale: float = 0.34
     offcenter_z_scale: float = 0.20
     center_hold_probability: float = 0.22
@@ -176,6 +178,11 @@ class RenderConfig:
     frame_seed: int = 23
     output_format: str = "webp"
     output_quality: int = 78
+    combination_strategy: str = "exhaustive"
+    variants_per_combo: int = 1
+    distance_bins: int = 3
+    target_images_per_model: int = 400
+    combo_selection: str = "pairwise"
 
     @property
     def elevation_degs(self) -> list[int]:
@@ -351,23 +358,68 @@ def compute_bounds(mesh_or_meshes):
     return center, extents, diagonal
 
 
+def safe_normalize(vector: np.ndarray, eps: float = 1e-9) -> np.ndarray | None:
+    norm = float(np.linalg.norm(vector))
+    if not np.isfinite(norm) or norm < eps:
+        return None
+    normalized = vector / norm
+    if not np.all(np.isfinite(normalized)):
+        return None
+    return normalized
+
+
 def look_at(
     camera_position,
     target=np.array([0.0, 0.0, 0.0]),
     up=np.array([0.0, 0.0, 1.0]),
     roll_deg: float = 0.0,
 ):
-    forward = target - camera_position
-    forward = forward / np.linalg.norm(forward)
-    right = np.cross(forward, up)
-    right = right / np.linalg.norm(right)
-    true_up = np.cross(right, forward)
+    camera_position = np.asarray(camera_position, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    up = np.asarray(up, dtype=np.float64)
+
+    if not np.all(np.isfinite(camera_position)):
+        camera_position = np.zeros(3, dtype=np.float64)
+    if not np.all(np.isfinite(target)):
+        target = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    if not np.all(np.isfinite(up)):
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+    forward = safe_normalize(target - camera_position)
+    if forward is None:
+        forward = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+    up = safe_normalize(up)
+    if up is None:
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+    if abs(float(np.dot(forward, up))) > 0.985:
+        fallback_ups = (
+            np.array([0.0, 1.0, 0.0], dtype=np.float64),
+            np.array([1.0, 0.0, 0.0], dtype=np.float64),
+            np.array([0.0, 0.0, 1.0], dtype=np.float64),
+        )
+        for candidate in fallback_ups:
+            if abs(float(np.dot(forward, candidate))) < 0.985:
+                up = candidate
+                break
+
+    right = safe_normalize(np.cross(forward, up))
+    if right is None:
+        right = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    true_up = safe_normalize(np.cross(right, forward))
+    if true_up is None:
+        true_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
     roll = math.radians(roll_deg)
     cos_r = math.cos(roll)
     sin_r = math.sin(roll)
-    right_r = cos_r * right + sin_r * true_up
-    up_r = -sin_r * right + cos_r * true_up
+    right_r = safe_normalize((cos_r * right) + (sin_r * true_up))
+    up_r = safe_normalize((-sin_r * right) + (cos_r * true_up))
+    if right_r is None:
+        right_r = right
+    if up_r is None:
+        up_r = true_up
 
     pose = np.eye(4)
     pose[:3, 0] = right_r
@@ -452,16 +504,184 @@ def frame_rng(model_seed: int, frame_index: int) -> np.random.Generator:
     return np.random.default_rng(frame_seed)
 
 
+def build_distance_bins(render_config: RenderConfig) -> list[tuple[str, float, float]]:
+    if render_config.distance_bins <= 0:
+        return [("mid", render_config.distance_min_scale, render_config.distance_max_scale)]
+
+    lo = float(render_config.distance_min_scale)
+    hi = float(render_config.distance_max_scale)
+    if hi <= lo:
+        return [("mid", lo, lo)]
+
+    bin_edges = np.linspace(lo, hi, num=render_config.distance_bins + 1, dtype=np.float64)
+    bins: list[tuple[str, float, float]] = []
+    for idx in range(render_config.distance_bins):
+        label = DISTANCE_LABELS[idx] if idx < len(DISTANCE_LABELS) else f"dist{idx + 1:02d}"
+        bins.append((label, float(bin_edges[idx]), float(bin_edges[idx + 1])))
+    return bins
+
+
+def build_frame_combinations(
+    render_config: RenderConfig,
+) -> list[tuple[dict, dict, dict, str, float, float, int]]:
+    distance_bins = build_distance_bins(render_config)
+    combos: list[tuple[dict, dict, dict, str, float, float, int]] = []
+
+    if render_config.combination_strategy == "cyclic":
+        cycle_len = max(len(SKY_PRESETS), len(LIGHT_POSITION_PRESETS), len(LIGHT_STYLE_PRESETS), len(distance_bins))
+        for cycle_idx in range(cycle_len):
+            sky = SKY_PRESETS[cycle_idx % len(SKY_PRESETS)]
+            light = LIGHT_POSITION_PRESETS[cycle_idx % len(LIGHT_POSITION_PRESETS)]
+            light_style = LIGHT_STYLE_PRESETS[cycle_idx % len(LIGHT_STYLE_PRESETS)]
+            dist_name, dist_min, dist_max = distance_bins[cycle_idx % len(distance_bins)]
+            for variant_idx in range(render_config.variants_per_combo):
+                combos.append((sky, light, light_style, dist_name, dist_min, dist_max, variant_idx))
+        return combos
+
+    for sky in SKY_PRESETS:
+        for light in LIGHT_POSITION_PRESETS:
+            for light_style in LIGHT_STYLE_PRESETS:
+                for dist_name, dist_min, dist_max in distance_bins:
+                    for variant_idx in range(render_config.variants_per_combo):
+                        combos.append((sky, light, light_style, dist_name, dist_min, dist_max, variant_idx))
+    return combos
+
+
+def build_pose_grid(render_config: RenderConfig) -> list[tuple[str, float, int, int]]:
+    azimuth_values = list(range(0, 360, render_config.azimuth_step_deg))
+    elevation_values = render_config.elevation_degs
+    per_orientation: list[list[tuple[str, float, int, int]]] = []
+    for orientation_name, roll_deg in render_config.orientation_modes:
+        orientation_poses: list[tuple[str, float, int, int]] = []
+        for azimuth_deg in azimuth_values:
+            for elevation_deg in elevation_values:
+                orientation_poses.append((orientation_name, roll_deg, azimuth_deg, elevation_deg))
+        per_orientation.append(orientation_poses)
+
+    interleaved: list[tuple[str, float, int, int]] = []
+    max_len = max((len(bucket) for bucket in per_orientation), default=0)
+    for idx in range(max_len):
+        for bucket in per_orientation:
+            if idx < len(bucket):
+                interleaved.append(bucket[idx])
+    return interleaved
+
+
+def select_even_indices(total: int, count: int, offset: float = 0.0) -> list[int]:
+    if count <= 0 or total <= 0:
+        return []
+    if count >= total:
+        return list(range(total))
+    step = total / float(count)
+    indices = []
+    for i in range(count):
+        value = ((i + 0.5) * step + offset) % total
+        indices.append(int(math.floor(value)))
+    return indices
+
+
+def build_pose_schedule(
+    poses: list[tuple[str, float, int, int]],
+    total_frames: int,
+    model_seed: int,
+) -> list[tuple[str, float, int, int]]:
+    if not poses:
+        raise ValueError("No camera poses available for scheduling.")
+    if total_frames <= 0:
+        return []
+
+    offset_idx = int(model_seed % len(poses))
+    rotated = poses[offset_idx:] + poses[:offset_idx]
+    if total_frames <= len(rotated):
+        extra_offset = float((model_seed >> 8) % len(rotated))
+        return [rotated[idx] for idx in select_even_indices(len(rotated), total_frames, offset=extra_offset)]
+
+    repeats = total_frames // len(rotated)
+    remainder = total_frames % len(rotated)
+    schedule = rotated * repeats
+    if remainder > 0:
+        extra_offset = float((model_seed >> 8) % len(rotated))
+        schedule.extend(rotated[idx] for idx in select_even_indices(len(rotated), remainder, offset=extra_offset))
+    return schedule
+
+
+def combo_factor_keys(combo: tuple[dict, dict, dict, str, float, float, int]) -> tuple[str, str, str, str]:
+    sky, light, light_style, distance_name, _, _, _ = combo
+    return sky["name"], light["name"], light_style["name"], distance_name
+
+
+def combo_pair_keys(combo: tuple[dict, dict, dict, str, float, float, int]) -> list[tuple[str, str, str]]:
+    sky_name, light_name, style_name, distance_name = combo_factor_keys(combo)
+    return [
+        ("sky_light", sky_name, light_name),
+        ("sky_style", sky_name, style_name),
+        ("sky_distance", sky_name, distance_name),
+        ("light_style", light_name, style_name),
+        ("light_distance", light_name, distance_name),
+        ("style_distance", style_name, distance_name),
+    ]
+
+
+def build_combo_schedule(
+    frame_combinations: list[tuple[dict, dict, dict, str, float, float, int]],
+    total_frames: int,
+    selection_mode: str,
+    model_seed: int,
+) -> list[tuple[dict, dict, dict, str, float, float, int]]:
+    if not frame_combinations:
+        raise ValueError("No environment combinations available for scheduling.")
+    if total_frames <= 0:
+        return []
+
+    if selection_mode == "round_robin":
+        start = int((model_seed >> 12) % len(frame_combinations))
+        ordered = frame_combinations[start:] + frame_combinations[:start]
+        return [ordered[i % len(ordered)] for i in range(total_frames)]
+
+    rng = np.random.default_rng((model_seed ^ 0xA5A5A5A5A5A5A5A5) & 0xFFFFFFFFFFFFFFFF)
+    tie_breakers = rng.random(len(frame_combinations))
+    level_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
+    pair_counts: defaultdict[tuple[str, str, str], int] = defaultdict(int)
+    scheduled: list[tuple[dict, dict, dict, str, float, float, int]] = []
+    last_idx = -1
+
+    factor_cache = [combo_factor_keys(combo) for combo in frame_combinations]
+    pair_cache = [combo_pair_keys(combo) for combo in frame_combinations]
+
+    for _ in range(total_frames):
+        best_idx = 0
+        best_score = float("-inf")
+        for idx, combo in enumerate(frame_combinations):
+            factors = factor_cache[idx]
+            pairs = pair_cache[idx]
+            pair_gain = sum(1.0 / (1.0 + pair_counts[pair]) for pair in pairs)
+            factor_gain = sum(1.0 / (1.0 + level_counts[(f"group_{i}", value)]) for i, value in enumerate(factors))
+            repeat_penalty = 1.0 if idx == last_idx else 0.0
+            score = (3.4 * pair_gain) + factor_gain - (0.7 * repeat_penalty) + (1e-6 * tie_breakers[idx])
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        picked = frame_combinations[best_idx]
+        scheduled.append(picked)
+        for i, value in enumerate(factor_cache[best_idx]):
+            level_counts[(f"group_{i}", value)] += 1
+        for pair in pair_cache[best_idx]:
+            pair_counts[pair] += 1
+        last_idx = best_idx
+    return scheduled
+
+
 def sample_frame_variant(
     rng: np.random.Generator,
     mesh_extents: np.ndarray,
     render_config: RenderConfig,
-) -> tuple[float, np.ndarray, dict]:
-    distance_scale = float(rng.uniform(render_config.distance_min_scale, render_config.distance_max_scale))
-    light_style = LIGHT_STYLE_PRESETS[int(rng.integers(0, len(LIGHT_STYLE_PRESETS)))]
-
+    distance_lo: float,
+    distance_hi: float,
+) -> tuple[float, np.ndarray]:
+    distance_scale = float(rng.uniform(distance_lo, distance_hi))
     if rng.random() < render_config.center_hold_probability:
-        return distance_scale, np.zeros(3, dtype=np.float64), light_style
+        return distance_scale, np.zeros(3, dtype=np.float64)
 
     xy_raw = rng.uniform(-1.0, 1.0, size=2)
     xy_norm = float(np.linalg.norm(xy_raw))
@@ -480,7 +700,7 @@ def sample_frame_variant(
         ],
         dtype=np.float64,
     )
-    return distance_scale, target_bias, light_style
+    return distance_scale, target_bias
 
 
 def maybe_apply_fake_clouds(
@@ -578,6 +798,15 @@ def build_scene(mesh_path: Path, force_untextured: bool = False):
 def is_ctypes_array_handler_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     return "no array-type handler" in msg and "_ctypes.type" in msg
+
+
+def is_eigenvalue_convergence_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "eigenvalues did not converge" in msg
+
+
+def is_finite_pose(pose: np.ndarray | None) -> bool:
+    return pose is not None and np.asarray(pose).shape == (4, 4) and np.all(np.isfinite(pose))
 
 
 def compute_camera_pose(
@@ -928,6 +1157,8 @@ def write_render_manifest(
     removed_existing: int,
     render_config: RenderConfig,
 ) -> None:
+    pose_count = len(build_pose_grid(render_config))
+    combinations_per_pose = len(build_frame_combinations(render_config))
     payload = {
         "mesh_path": str(mesh_path),
         "output_dir": str(output_dir),
@@ -949,6 +1180,14 @@ def write_render_manifest(
         "frame_seed": render_config.frame_seed,
         "output_format": render_config.output_format,
         "output_quality": render_config.output_quality,
+        "combination_strategy": render_config.combination_strategy,
+        "variants_per_combo": render_config.variants_per_combo,
+        "distance_bins": render_config.distance_bins,
+        "pose_count": pose_count,
+        "combinations_per_pose": combinations_per_pose,
+        "target_images_per_model": render_config.target_images_per_model,
+        "combo_selection": render_config.combo_selection,
+        "frame_count_is_successful_writes": True,
         "updated_at": utc_now_iso(),
     }
     write_json(manifest_path, payload)
@@ -971,15 +1210,30 @@ def render_one_mesh(
     extension = output_extension(render_config.output_format)
     model_seed = stable_seed(mesh_signature(mesh_path), render_config.frame_seed)
 
-    elevation_degs = render_config.elevation_degs
-    total_frames = (
-        len(render_config.orientation_modes)
-        * len(range(0, 360, render_config.azimuth_step_deg))
-        * len(elevation_degs)
+    poses = build_pose_grid(render_config)
+    if not poses:
+        raise ValueError("No camera poses generated. Check angle/orientation settings.")
+    frame_combinations = build_frame_combinations(render_config)
+    if not frame_combinations:
+        raise ValueError("No frame combinations were generated. Check combination settings.")
+    max_frames = len(poses) * len(frame_combinations)
+    if render_config.target_images_per_model > 0:
+        total_frames = min(render_config.target_images_per_model, max_frames)
+    else:
+        total_frames = max_frames
+    pose_schedule = build_pose_schedule(poses=poses, total_frames=total_frames, model_seed=model_seed)
+    combo_schedule = build_combo_schedule(
+        frame_combinations=frame_combinations,
+        total_frames=total_frames,
+        selection_mode=render_config.combo_selection,
+        model_seed=model_seed,
     )
+    if len(pose_schedule) != len(combo_schedule):
+        raise RuntimeError("Pose/combo scheduling mismatch.")
 
     frame_idx = 0
     generated_paths: list[Path] = []
+    skipped_render_frames = 0
     for force_untextured in (False, True):
         scene: pyrender.Scene | None = None
         camera = None
@@ -1002,65 +1256,114 @@ def render_one_mesh(
             )
             camera_node = scene.add(camera, pose=np.eye(4))
 
-            for orientation_name, roll_deg in render_config.orientation_modes:
-                for azimuth_deg in range(0, 360, render_config.azimuth_step_deg):
-                    for elevation_deg in elevation_degs:
-                        rng = frame_rng(model_seed=model_seed, frame_index=frame_idx)
-                        phase = (2.0 * math.pi * frame_idx) / max(total_frames - 1, 1)
-                        sky, light = select_environment_variant(frame_idx)
-                        distance_scale, target_bias, light_style = sample_frame_variant(
-                            rng=rng,
-                            mesh_extents=mesh_extents,
-                            render_config=render_config,
-                        )
-                        dir_node, fill_node = apply_environment_lighting(
-                            scene=scene,
-                            mesh_center=mesh_center,
-                            base_radius=base_radius,
-                            sky=sky,
-                            light=light,
-                            light_style=light_style,
-                            dir_node=dir_node,
-                            fill_node=fill_node,
-                        )
-                        cam_pose = compute_camera_pose(
-                            mesh_center=mesh_center,
-                            mesh_extents=mesh_extents,
-                            base_radius=base_radius,
-                            azimuth_deg=azimuth_deg,
-                            elevation_deg=elevation_deg,
-                            roll_deg=roll_deg,
-                            phase=phase,
-                            distance_scale=distance_scale,
-                            target_bias=target_bias,
-                        )
+            for frame_idx, ((orientation_name, roll_deg, azimuth_deg, elevation_deg), combo) in enumerate(
+                zip(pose_schedule, combo_schedule)
+            ):
+                sky, light, light_style, distance_name, dist_min, dist_max, variant_idx = combo
+                rng = frame_rng(model_seed=model_seed, frame_index=frame_idx)
+                phase = (2.0 * math.pi * frame_idx) / max(total_frames - 1, 1)
+                distance_scale, target_bias = sample_frame_variant(
+                    rng=rng,
+                    mesh_extents=mesh_extents,
+                    render_config=render_config,
+                    distance_lo=dist_min,
+                    distance_hi=dist_max,
+                )
+                dir_node, fill_node = apply_environment_lighting(
+                    scene=scene,
+                    mesh_center=mesh_center,
+                    base_radius=base_radius,
+                    sky=sky,
+                    light=light,
+                    light_style=light_style,
+                    dir_node=dir_node,
+                    fill_node=fill_node,
+                )
+                cam_pose = compute_camera_pose(
+                    mesh_center=mesh_center,
+                    mesh_extents=mesh_extents,
+                    base_radius=base_radius,
+                    azimuth_deg=azimuth_deg,
+                    elevation_deg=elevation_deg,
+                    roll_deg=roll_deg,
+                    phase=phase,
+                    distance_scale=distance_scale,
+                    target_bias=target_bias,
+                )
 
-                        scene.set_pose(camera_node, pose=cam_pose)
+                if not is_finite_pose(cam_pose):
+                    skipped_render_frames += 1
+                    continue
+
+                scene.set_pose(camera_node, pose=cam_pose)
+                try:
+                    color, _ = renderer.render(scene)
+                except Exception as exc:
+                    if not is_eigenvalue_convergence_error(exc):
+                        raise
+
+                    # Retry once with a numerically safe baseline lighting/camera setup.
+                    safe_sky = SKY_PRESETS[0]
+                    safe_light = LIGHT_POSITION_PRESETS[0]
+                    safe_style = LIGHT_STYLE_PRESETS[1] if len(LIGHT_STYLE_PRESETS) > 1 else LIGHT_STYLE_PRESETS[0]
+                    dir_node, fill_node = apply_environment_lighting(
+                        scene=scene,
+                        mesh_center=mesh_center,
+                        base_radius=base_radius,
+                        sky=safe_sky,
+                        light=safe_light,
+                        light_style=safe_style,
+                        dir_node=dir_node,
+                        fill_node=fill_node,
+                    )
+                    safe_pose = compute_camera_pose(
+                        mesh_center=mesh_center,
+                        mesh_extents=mesh_extents,
+                        base_radius=base_radius,
+                        azimuth_deg=azimuth_deg,
+                        elevation_deg=elevation_deg,
+                        roll_deg=roll_deg,
+                        phase=None,
+                        distance_scale=1.0,
+                        target_bias=np.zeros(3, dtype=np.float64),
+                    )
+                    if not is_finite_pose(safe_pose):
+                        skipped_render_frames += 1
+                        continue
+
+                    scene.set_pose(camera_node, pose=safe_pose)
+                    try:
                         color, _ = renderer.render(scene)
-                        color = maybe_apply_fake_clouds(
-                            color_buffer=color,
-                            rng=rng,
-                            cloud_probability=render_config.cloud_probability,
-                            cloud_max_layers=render_config.cloud_max_layers,
-                        )
+                    except Exception as retry_exc:
+                        if not is_eigenvalue_convergence_error(retry_exc):
+                            raise
+                        skipped_render_frames += 1
+                        continue
 
-                        filename = (
-                            f"{prefix}{orientation_name}_"
-                            f"{sky['name']}_{light['name']}_{light_style['name']}_"
-                            f"az{azimuth_deg:03d}_el{elevation_deg:+03d}_{frame_idx:05d}{extension}"
-                        )
-                        out_path = output_dir / filename
-                        save_render_array(
-                            color_buffer=color,
-                            output_path=out_path,
-                            output_format=render_config.output_format,
-                            output_quality=render_config.output_quality,
-                        )
-                        generated_paths.append(out_path)
-                        del color
-                        frame_idx += 1
-                        if render_config.gc_every_frames > 0 and frame_idx % render_config.gc_every_frames == 0:
-                            gc.collect()
+                color = maybe_apply_fake_clouds(
+                    color_buffer=color,
+                    rng=rng,
+                    cloud_probability=render_config.cloud_probability,
+                    cloud_max_layers=render_config.cloud_max_layers,
+                )
+
+                filename = (
+                    f"{prefix}{orientation_name}_"
+                    f"{sky['name']}_{light['name']}_{light_style['name']}_{distance_name}_v{variant_idx:02d}_"
+                    f"az{azimuth_deg:03d}_el{elevation_deg:+03d}_{frame_idx:05d}{extension}"
+                )
+                out_path = output_dir / filename
+                save_render_array(
+                    color_buffer=color,
+                    output_path=out_path,
+                    output_format=render_config.output_format,
+                    output_quality=render_config.output_quality,
+                )
+                generated_paths.append(out_path)
+                del color
+                if render_config.gc_every_frames > 0 and (frame_idx + 1) % render_config.gc_every_frames == 0:
+                    gc.collect()
+            frame_idx = len(generated_paths)
             break
         except Exception as exc:
             if force_untextured or not is_ctypes_array_handler_error(exc):
@@ -1093,7 +1396,7 @@ def render_one_mesh(
 
     print(
         f"[ok] {mesh_path.name}: wrote {frame_idx} images to {output_dir} "
-        f"(removed_existing={removed_existing})"
+        f"(removed_existing={removed_existing}, skipped_frames={skipped_render_frames})"
     )
     return frame_idx
 
@@ -1153,15 +1456,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clean-output", action="store_true", help="Delete previous renders for each mesh before writing.")
     parser.add_argument("--limit-models", type=int, default=0, help="Process only the first N meshes (0 means all).")
     parser.add_argument(
+        "--combination-strategy",
+        type=str,
+        choices=("exhaustive", "cyclic"),
+        default="exhaustive",
+        help="exhaustive=full sky/light/style/distance cross-product per camera pose; cyclic=lighter cycling pass.",
+    )
+    parser.add_argument(
+        "--combo-selection",
+        type=str,
+        choices=("pairwise", "round_robin"),
+        default="pairwise",
+        help="pairwise=greedy high-coverage sampling across factor pairs; round_robin=simple deterministic cycling.",
+    )
+    parser.add_argument(
+        "--target-images-per-model",
+        type=int,
+        default=400,
+        help="Target render count per model (0 means full pose x combination expansion).",
+    )
+    parser.add_argument(
+        "--variants-per-combo",
+        type=int,
+        default=1,
+        help="Additional jittered samples per environment combination.",
+    )
+    parser.add_argument(
+        "--distance-bins",
+        type=int,
+        default=3,
+        help="How many distance bands to render (near/mid/far...).",
+    )
+    parser.add_argument(
         "--distance-min-scale",
         type=float,
-        default=0.78,
+        default=0.55,
         help="Minimum camera distance multiplier relative to base fit distance.",
     )
     parser.add_argument(
         "--distance-max-scale",
         type=float,
-        default=1.45,
+        default=1.95,
         help="Maximum camera distance multiplier relative to base fit distance.",
     )
     parser.add_argument(
@@ -1252,6 +1587,12 @@ def main() -> None:
         raise ValueError("--cloud-probability must be in [0, 1]")
     if args.cloud_max_layers < 0:
         raise ValueError("--cloud-max-layers must be >= 0")
+    if args.variants_per_combo < 1:
+        raise ValueError("--variants-per-combo must be >= 1")
+    if args.distance_bins < 1:
+        raise ValueError("--distance-bins must be >= 1")
+    if args.target_images_per_model < 0:
+        raise ValueError("--target-images-per-model must be >= 0")
 
     if args.auto_approve_all_first and args.approval_mode != "off":
         newly_approved, already_approved = bulk_auto_approve(
@@ -1283,6 +1624,11 @@ def main() -> None:
         frame_seed=args.seed,
         output_format=output_format,
         output_quality=args.output_quality,
+        combination_strategy=args.combination_strategy,
+        combo_selection=args.combo_selection,
+        variants_per_combo=args.variants_per_combo,
+        distance_bins=args.distance_bins,
+        target_images_per_model=args.target_images_per_model,
     )
     images_index = build_existing_images_index(images_root)
 
