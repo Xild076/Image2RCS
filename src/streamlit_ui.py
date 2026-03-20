@@ -14,10 +14,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import torch
+import matplotlib.pyplot as plt
 from PIL import Image, ImageOps
 
 from device_utils import describe_device, mps_is_available, resolve_device
 from inference import load_checkpoint, predict_images
+from model_interp import generate_interpretation
 
 
 DEFAULT_CHECKPOINT = Path("checkpoints") / "best_model.pt"
@@ -129,25 +131,22 @@ def inject_styles() -> None:
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&display=swap');
 
         :root {
-            --bg-color: #f4f6fb;
-            --panel-bg: rgba(255, 255, 255, 0.88);
-            --text-main: #0b1728;
-            --text-muted: #384a61;
-            --text-light: #5f7390;
-            --border: #bfd0e6;
-            --border-light: #d8e2ef;
-            --accent: #0f2443;
-            --accent-hover: #18345f;
-            --accent-blue: #0ea5e9;
-            --predict: #ea580c;
-            --predict-soft: #ffedd5;
-            --chart-bg: #ffffff;
-            --chart-grid: #e6eef8;
-            --shadow-subtle: 0 8px 20px rgba(15, 36, 67, 0.08);
-            --shadow-floating: 0 20px 45px rgba(15, 36, 67, 0.14);
+            --bg-color: #FAFAFA;
+            --panel-bg: #FFFFFF;
+            --text-main: #2C363F;
+            --text-muted: #6A7B82;
+            --text-light: #A0AEB4;
+            --border: #EAEAE4;
+            --border-light: #F4F4EF;
+            --accent: #4A6C6F;
+            --accent-hover: #365255;
+            --predict: #D4795B;
+            --predict-soft: #FBF1ED;
+            --shadow-soft: 0 4px 16px rgba(44, 54, 63, 0.04);
+            --shadow-float: 0 16px 40px rgba(44, 54, 63, 0.08);
         }
 
         * { box-sizing: border-box; }
@@ -159,446 +158,283 @@ def inject_styles() -> None:
         }
 
         .stApp {
-            background: radial-gradient(1200px 600px at -10% -20%, #dbeafe 0%, transparent 55%),
-                        radial-gradient(900px 500px at 110% 0%, #fde68a 0%, transparent 45%),
-                        var(--bg-color);
-            font-family: 'Sora', sans-serif;
+            background-color: var(--bg-color);
+            font-family: 'Outfit', sans-serif;
             color: var(--text-main);
         }
 
         .main .block-container {
             max-width: 1400px;
-            padding: 2rem 3rem;
-            background-color: var(--bg-color);
+            padding: 3rem 4rem;
         }
         
         [data-testid="stAppViewContainer"] {
-            background: radial-gradient(1200px 600px at -10% -20%, #dbeafe 0%, transparent 55%),
-                        radial-gradient(900px 500px at 110% 0%, #fde68a 0%, transparent 45%),
-                        var(--bg-color);
+            background-color: transparent;
         }
         
-        /* Column and container spacing */
-        [data-testid="column"] {
-            gap: 0 !important;
+        /* Typography */
+        h1, h2, h3, h4, h5, h6 {
+            color: var(--text-main) !important;
+            font-family: 'Playfair Display', serif !important;
+            letter-spacing: -0.01em;
+            font-weight: 600 !important;
         }
-        
-        [data-testid="stVerticalBlock"] > [data-testid="stVerticalBlockBorderWrapper"] {
-            gap: 0.5rem !important;
+
+        p, span, div {
+            font-family: 'Outfit', sans-serif;
+            color: var(--text-main);
+            line-height: 1.6;
+            letter-spacing: 0.01em;
         }
 
         /* Hero Container */
         .hero {
-            background: linear-gradient(120deg, #0f172a 0%, #1e3a8a 40%, #0ea5e9 100%);
-            border-radius: 24px;
-            padding: 3rem 4rem;
-            color: #ffffff;
-            box-shadow: var(--shadow-floating);
-            margin-bottom: 2.5rem;
+            background: var(--panel-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 4rem;
+            color: var(--text-main);
+            box-shadow: var(--shadow-float);
+            margin-bottom: 3rem;
             position: relative;
             overflow: hidden;
             display: flex;
             flex-direction: column;
             align-items: center;
             text-align: center;
-            border: 1px solid rgba(255, 255, 255, 0.22);
-        }
-        .hero::before {
-            content: "";
-            position: absolute;
-            top: -50%; left: -50%;
-            width: 200%; height: 200%;
-            background:
-                radial-gradient(circle at 30% 35%, rgba(255, 255, 255, 0.24) 0%, transparent 42%),
-                radial-gradient(circle at 72% 58%, rgba(255, 237, 213, 0.26) 0%, transparent 40%);
-            pointer-events: none;
         }
         .hero-eyebrow {
             display: inline-block;
             margin-bottom: 1.2rem;
-            padding: 0.35rem 1rem;
-            border-radius: 100px;
-            background: rgba(255, 255, 255, 0.2);
-            backdrop-filter: blur(10px);
-            font-size: 0.8rem;
-            font-weight: 600;
+            padding: 0.4rem 1.2rem;
+            background: rgba(74, 108, 111, 0.1);
+            border-radius: 40px;
+            font-size: 0.85rem;
+            font-weight: 500;
             letter-spacing: 0.08em;
             text-transform: uppercase;
-            color: #eff6ff;
-            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: var(--accent);
             z-index: 1;
         }
         .hero h1 {
             margin: 0;
             font-size: clamp(2.5rem, 4vw, 3.5rem);
-            font-weight: 800;
-            line-height: 1.1;
-            letter-spacing: -0.02em;
-            color: #ffffff !important;
+            font-weight: 700 !important;
+            line-height: 1.2;
+            color: var(--text-main) !important;
             z-index: 1;
         }
         .hero p {
-            margin: 1.2rem auto 0;
+            margin: 1.5rem auto 0;
             font-size: 1.15rem;
-            color: #cbd5e1 !important;
-            max-width: 700px;
-            line-height: 1.6;
-            font-weight: 400;
+            color: var(--text-muted) !important;
+            max-width: 650px;
             z-index: 1;
-        }
-
-        /* Sleek White Panels */
-        .panel {
-            background: var(--panel-bg);
-            border-radius: 22px;
-            padding: 2rem 2.2rem;
-            border: 1px solid rgba(255, 255, 255, 0.75);
-            backdrop-filter: blur(12px);
-            box-shadow: var(--shadow-subtle);
-            transition: box-shadow 0.3s ease, transform 0.3s ease, border-color 0.3s ease;
-            position: relative;
-        }
-        .panel:hover {
-            box-shadow: var(--shadow-floating);
-            transform: translateY(-1px);
-            border-color: #bfdbfe;
-        }
-
-        .section-kicker {
-            display: inline-block;
-            background: #f1f5f9;
-            color: #475569;
-            padding: 0.35rem 0.9rem;
-            border-radius: 100px;
-            font-size: 0.72rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.12em;
-            margin-bottom: 1rem;
-        }
-        .section-head {
-            color: var(--text-main);
-            font-size: 1.8rem;
-            font-weight: 800;
-            margin: 0 0 1.8rem 0;
-            letter-spacing: -0.015em;
         }
 
         /* Sidebar Styling */
         [data-testid="stSidebar"] {
-            background: rgba(255, 255, 255, 0.9);
-            border-right: 1px solid #dbe8f6;
+            background: #F4F4EF;
+            border-right: 1px solid var(--border);
         }
-        [data-testid="stSidebar"] .block-container {
-            padding-top: 1.2rem;
+        [data-testid="stSidebar"] hr {
+            border-color: var(--border);
         }
         [data-testid="stSidebar"] label {
             color: var(--text-main) !important;
             font-weight: 500;
-            font-size: 0.95rem;
-        }
-        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
-            color: var(--text-main) !important;
-            font-weight: 500;
-        }
-        .sidebar-note {
-            background: #f8fafc;
-            border: 1px solid var(--border-light);
-            border-radius: 14px;
-            padding: 1.2rem;
-            color: #475569;
             font-size: 0.9rem;
-            line-height: 1.5;
-            margin-top: 1.5rem;
         }
-
+        
         /* Metric Cards */
         [data-testid="stMetric"] {
-            background: rgba(255, 255, 255, 0.93);
-            border: 1px solid #d8e2ef;
-            border-radius: 16px;
+            background: var(--panel-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
             padding: 1.5rem;
-            transition: all 0.2s ease;
+            transition: all 0.3s ease;
             position: relative;
-            overflow: hidden;
+            box-shadow: var(--shadow-soft);
         }
         [data-testid="stMetric"]::before {
             content: "";
             position: absolute;
             top: 0; left: 0;
-            width: 5px; height: 100%;
-            background: var(--text-muted);
-            border-radius: 5px 0 0 5px;
-            transition: background 0.3s ease;
+            width: 4px; height: 100%;
+            background: var(--accent);
+            border-radius: 8px 0 0 8px;
         }
         [data-testid="stMetric"]:hover {
             transform: translateY(-2px);
-            box-shadow: var(--shadow-floating);
-            border-color: #bfdbfe;
-            background: #eef6ff;
-        }
-        [data-testid="stMetric"]:hover::before {
-            background: var(--accent-blue);
+            box-shadow: var(--shadow-float);
+            border-color: var(--border-light);
         }
         
-        /* First metric (Prediction) gets orange accent */
+        /* First metric (Prediction) gets subtle accent */
         [data-testid="column"]:first-child [data-testid="stMetric"]::before {
             background: var(--predict);
         }
 
         [data-testid="stMetricValue"] {
             font-size: 1.7rem !important;
-            font-weight: 800 !important;
+            font-weight: 500 !important;
             color: var(--text-main) !important;
-            letter-spacing: -0.015em;
-            line-height: 1.2;
+            font-family: 'Playfair Display', serif !important;
         }
         [data-testid="stMetricLabel"] {
             color: var(--text-muted) !important;
-            font-size: 0.8rem !important;
-            font-weight: 600 !important;
+            font-size: 0.85rem !important;
+            font-weight: 500 !important;
             text-transform: uppercase;
-            letter-spacing: 0.06em;
+            letter-spacing: 0.05em;
             margin-bottom: 0.5rem;
         }
 
-        /* Primary Button Style */
+        /* Buttons */
         .stButton > button {
-            border-radius: 12px !important;
-            transition: all 0.2s ease !important;
-            font-weight: 600 !important;
-            width: 100%;
-        }
-        
-        .stButton > button[kind="primary"] {
-            background: linear-gradient(90deg, #0f2443 0%, #1d4ed8 100%) !important;
-            color: white !important;
-            border: none !important;
-            padding: 1.2rem !important;
+            background: var(--panel-bg) !important;
+            color: var(--text-main) !important;
+            border: 1px solid var(--border) !important;
+            border-radius: 6px !important;
+            font-family: 'Outfit', sans-serif !important;
+            font-weight: 500 !important;
             font-size: 1.05rem !important;
-            box-shadow: 0 8px 18px rgba(29, 78, 216, 0.25) !important;
+            padding: 0.8rem 1.5rem !important;
+            transition: all 0.2s ease !important;
+            box-shadow: var(--shadow-soft);
+        }
+        .stButton > button[kind="primary"] {
+            background: var(--text-main) !important;
+            color: #FFFFFF !important;
+            border: 1px solid var(--text-main) !important;
+        }
+        .stButton > button:hover {
+            transform: translateY(-1px) !important;
+            box-shadow: var(--shadow-float) !important;
         }
         .stButton > button[kind="primary"]:hover {
-            transform: translateY(-2px) !important;
-            box-shadow: 0 12px 22px rgba(29, 78, 216, 0.34) !important;
-            background: linear-gradient(90deg, #18345f 0%, #1e40af 100%) !important;
-        }
-        .stButton > button[kind="secondary"] {
-            background: #f1f5f9 !important;
-            color: var(--text-main) !important;
-            border: 1px solid var(--border-light) !important;
-        }
-
-        /* Native image/chart shells */
-        [data-testid="stImage"] {
-            border-radius: 16px;
-            border: 1px solid #d6e3f3;
-            background: rgba(255, 255, 255, 0.93);
-            padding: 0.6rem;
-            margin: 0.65rem 0 0.95rem;
-            box-shadow: var(--shadow-subtle);
+            background: #4A5560 !important;
+            color: #FFFFFF !important;
+            border-color: #4A5560 !important;
         }
 
         /* Altair Chart Container */
         [data-testid="stVegaLiteChart"] {
-            background: linear-gradient(180deg, #ffffff 0%, #f1f6fd 100%) !important;
-            border: 1px solid #bfdbfe;
-            border-radius: 16px;
-            padding: 1rem;
-            margin: 1rem 0 0.7rem;
-            box-shadow: var(--shadow-subtle);
-        }
-        
-        .vega-embed {
-            background: #fefefe !important;
-            color: #0f172a !important;
-        }
-
-        .vega-embed .vega-actions,
-        .vega-embed .mark-text,
-        .vega-embed text {
-            color: #334155 !important;
-            fill: #334155 !important;
+            background: var(--panel-bg) !important;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1.5rem 0 1rem;
+            box-shadow: var(--shadow-soft);
         }
 
         /* File Uploader */
         [data-testid="stFileUploaderDropzone"] {
-            background: #ffffff;
-            border: 2px dashed var(--border);
-            border-radius: 16px;
-            transition: all 0.2s ease;
-            padding: 2rem !important;
+            background: var(--panel-bg);
+            border: 1px dashed var(--text-light) !important;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+            box-shadow: var(--shadow-soft);
         }
         [data-testid="stFileUploaderDropzone"]:hover {
-            border-color: var(--accent-blue);
-            background: #f0f9ff;
-            transform: translateY(-1px);
+            border: 1px solid var(--accent) !important;
+            background: #F9FAFA;
         }
-        
-        [data-testid="stFileUploaderDropzone"] span,
-        [data-testid="stFileUploaderDropzone"] p {
-            color: #334155 !important;
-            font-weight: 500;
-            opacity: 1 !important;
-        }
-
         [data-testid="stFileUploaderDropzone"] * {
-            color: #334155 !important;
+            color: var(--text-main) !important;
         }
         
-        /* Status Messages */
+        /* Status / Result Messages */
         .result-note {
-            background: linear-gradient(135deg, #fef3c7 0%, #fef08a 100%);
-            border: 1px solid #fbbf24;
-            border-radius: 14px;
+            background: var(--predict-soft);
+            border: 1px solid rgba(212, 121, 91, 0.2);
+            border-radius: 8px;
             padding: 1.2rem 1.5rem;
-            color: #92400e;
-            font-size: 1rem;
+            color: var(--text-main);
+            font-size: 1.05rem;
             line-height: 1.6;
             margin: 2rem 0;
+            box-shadow: var(--shadow-soft);
         }
         .result-note strong {
-            font-weight: 700;
-            color: #b45309;
+            color: var(--predict);
+            font-weight: 500;
         }
         
         .placeholder-note {
-            background: #f8fafc;
-            border: 2px dashed var(--border);
-            border-radius: 20px;
-            padding: 2.2rem 1.6rem;
+            background: var(--panel-bg);
+            border: 1px dashed var(--border);
+            border-radius: 8px;
+            padding: 3rem 2rem;
             text-align: center;
             color: var(--text-muted);
             font-size: 1.1rem;
-            font-weight: 500;
             margin-top: 1.5rem;
+            box-shadow: var(--shadow-soft);
         }
 
         /* Expanders & Table */
         [data-testid="stExpander"] {
-            border-radius: 16px !important;
-            border: 1px solid var(--border-light) !important;
-            background: #ffffff !important;
+            border-radius: 8px !important;
+            border: 1px solid var(--border) !important;
+            background: var(--panel-bg) !important;
             margin-top: 1.5rem;
-            overflow: hidden;
+            box-shadow: var(--shadow-soft);
         }
         [data-testid="stExpander"] > div:first-child {
-            background: #f8fafc !important;
-            border-bottom: 1px solid var(--border-light) !important;
-            padding: 1.2rem !important;
+            background: var(--bg-color) !important;
+            border-bottom: 1px solid var(--border) !important;
+            padding: 1rem 1.2rem !important;
         }
-        [data-testid="stExpander"] > div:first-child button {
+        [data-testid="stExpander"] > div:first-child p {
             color: var(--text-main) !important;
-            font-weight: 600 !important;
+            font-weight: 500 !important;
         }
         
         [data-testid="stDataFrame"] {
-            border-radius: 16px;
-            border: 1px solid var(--border-light);
-            overflow: auto;
-            box-shadow: var(--shadow-subtle);
-        }
-
-        /* Typography & General */
-        h2, h3, h4 { 
-            color: var(--text-main) !important; 
-            font-weight: 800 !important; 
-            letter-spacing: -0.01em;
-            margin-top: 0 !important;
-        }
-        h2 { font-size: 1.8rem !important; }
-        h3 { font-size: 1.4rem !important; }
-        h4 { font-size: 1.15rem !important; }
-
-        .stApp p,
-        .stApp span,
-        .stApp a,
-        .stApp label {
-            color: #334155;
-        }
-
-        .hero p {
-            color: #cbd5e1 !important;
-        }
-
-        .hero h1,
-        .hero .hero-eyebrow {
-            color: #ffffff !important;
-        }
-        
-        [data-testid="stCaptionContainer"] {
-            color: #475569 !important;
-        }
-        
-        [data-testid="stMarkdownContainer"] p {
-            color: inherit;
-        }
-        
-        .mini-note { 
-            color: var(--text-light) !important; 
-            font-size: 0.9rem; 
-            line-height: 1.5; 
-            margin-top: 0.8rem; 
-        }
-        
-        hr { 
-            border-color: var(--border-light); 
-            margin: 1.5rem 0; 
-        }
-        
-        [data-testid="stAlert"] {
-            border-radius: 14px !important;
-            border: 1px solid var(--border-light) !important;
-            background: #f8fafc !important;
-        }
-        [data-testid="stAlert"] p {
-            color: var(--text-main) !important;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
         }
 
         /* Input Fields */
-        [data-testid="stWidgetLabel"] {
-            color: var(--text-main) !important;
-            font-weight: 600;
-        }
         input, select, textarea {
-            border-radius: 10px !important;
-            border-color: var(--border-light) !important;
-            font-family: 'Sora', sans-serif !important;
-            color: #334155 !important;
-        }
-        input::placeholder, select::placeholder, textarea::placeholder {
-            color: #94a3b8 !important;
+            background-color: var(--panel-bg) !important;
+            border-radius: 6px !important;
+            border: 1px solid var(--border) !important;
+            font-family: 'Outfit', sans-serif !important;
+            color: var(--text-main) !important;
         }
         input:focus, select:focus, textarea:focus {
-            border-color: var(--accent-blue) !important;
-            box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.1) !important;
+            border-color: var(--accent) !important;
+            box-shadow: 0 0 0 2px rgba(74, 108, 111, 0.1) !important;
         }
 
-        /* Responsive Design */
-        @media (max-width: 900px) {
-            .main .block-container {
-                padding-left: 1.5rem;
-                padding-right: 1.5rem;
-            }
-            .hero {
-                padding: 2rem 1.5rem;
-            }
-            .panel {
-                padding: 1.5rem;
-            }
-            .section-head {
-                font-size: 1.4rem;
-            }
+        /* Tweak images */
+        [data-testid="stImage"] {
+            background: var(--panel-bg);
+            padding: 0.5rem;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-soft);
+        }
+        [data-testid="stImage"] img {
+            border-radius: 4px;
+        }
+
+        .section-kicker {
+            display: inline-block;
+            background: var(--border);
+            color: var(--text-muted);
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
         
-        /* Spacing utilities - reduce gaps */
-        [data-testid="stVerticalBlock"] {
-            gap: 0.75rem !important;
-        }
-        
-        [data-testid="stHorizontalBlock"] {
-            gap: 1rem !important;
-        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -751,19 +587,20 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
                 labelFontSize=12,
                 titleFontSize=13,
                 format=".2e",
-                gridColor="#e2e8f0",
-                titleColor="#334155",
-                labelColor="#475569",
-                domainColor="#cbd5e1",
-                tickColor="#cbd5e1",
+                gridColor="#EAEAE4",
+                titleColor="#2C363F",
+                labelColor="#6A7B82",
+                domainColor="#EAEAE4",
+                tickColor="#EAEAE4",
                 titlePadding=15,
+                gridDash=[4, 4],
             ),
         ),
         y=alt.Y(
             "aircraft_name:N",
             title=None,
             sort=y_order,
-            axis=alt.Axis(labelFontSize=12, labelColor="#334155", domainColor="#cbd5e1", tickColor="#cbd5e1", labelPadding=12),
+            axis=alt.Axis(labelFontSize=12, labelColor="#6A7B82", domainColor="#EAEAE4", tickColor="#EAEAE4", labelPadding=12),
         ),
         tooltip=[
             alt.Tooltip("aircraft_name:N", title="Aircraft"),
@@ -778,9 +615,9 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
     )
 
     references = base.transform_filter(alt.datum.source == "Reference").mark_circle(
-        stroke="#0f172a",
+        stroke="#2C363F",
         strokeWidth=1.0,
-        opacity=0.82,
+        opacity=0.85,
     ).encode(
         size=alt.Size("marker_size:Q", scale=None, legend=None),
         color=alt.Color(
@@ -790,19 +627,19 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
                 labelFontSize=11,
                 titleFontSize=12,
                 symbolSize=160,
-                titleColor="#334155",
-                labelColor="#334155",
+                titleColor="#2C363F",
+                labelColor="#6A7B82",
             ),
             scale=alt.Scale(
                 range=[
-                    "#0d9488",
-                    "#2563eb",
-                    "#dc2626",
-                    "#7c3aed",
-                    "#ca8a04",
-                    "#0891b2",
-                    "#be123c",
-                    "#4338ca",
+                    "#4A6C6F",
+                    "#618A9D",
+                    "#A0AEB4",
+                    "#D4795B",
+                    "#798D98",
+                    "#B49A84",
+                    "#95A8A4",
+                    "#E0A96D",
                 ]
             ),
         )
@@ -811,26 +648,27 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
     prediction = base.transform_filter(alt.datum.source == "Prediction").mark_point(
         shape="diamond",
         filled=True,
-        stroke="#9a3412",
+        stroke="#FFFFFF",
         strokeWidth=1.5,
-        color="#ea580c",
+        color="#D4795B",
         opacity=1.0,
     ).encode(size=alt.Size("marker_size:Q", scale=None, legend=None))
 
     band_df = pd.DataFrame({"x0": [lower_band], "x1": [upper_band]})
-    confidence_band = alt.Chart(band_df).mark_rect(color="#fed7aa", opacity=0.26).encode(x="x0:Q", x2="x1:Q")
+    confidence_band = alt.Chart(band_df).mark_rect(color="#D4795B", opacity=0.08).encode(x="x0:Q", x2="x1:Q")
 
-    rule_df = pd.DataFrame({"rcs_plot": [prediction_value], "label": [f"Prediction: {prediction_value:.3e} m^2"]})
-    prediction_rule = alt.Chart(rule_df).mark_rule(color="#ea580c", strokeDash=[6, 4], strokeWidth=2.0).encode(x="rcs_plot:Q")
+    rule_df = pd.DataFrame({"rcs_plot": [prediction_value], "label": [f"Estimated RCS: {prediction_value:.3e} m^2"]})
+    prediction_rule = alt.Chart(rule_df).mark_rule(color="#D4795B", strokeDash=[4, 4], strokeWidth=2.0).encode(x="rcs_plot:Q")
     rule_label = (
         alt.Chart(rule_df)
         .mark_text(
             align="left",
             dx=8,
             dy=-12,
-            color="#ea580c",
-            fontSize=12,
-            fontWeight=700,
+            color="#D4795B",
+            fontSize=13,
+            font="Outfit",
+            fontWeight=600,
         )
         .encode(x="rcs_plot:Q", y=alt.value(10), text="label:N")
     )
@@ -840,54 +678,55 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
         .properties(
             height=min(max(480, 38 * len(plot_df)), 880),
             title=alt.TitleParams(
-                text="RCS Comparison Mapping",
-                subtitle=["Nearest aircraft are chosen using log-distance for better multiplicative RCS accuracy."],
+                text="Radar Cross-Section Comparison",
+                subtitle=["Nearest matches calculated via log-distance for accuracy across scales."],
                 fontSize=18,
-                fontWeight=800,
+                fontWeight=600,
                 subtitleFontSize=13,
-                subtitleColor="#475569",
+                subtitleColor="#6A7B82",
                 offset=16,
-                color="#0f172a"
+                color="#2C363F",
             ),
             width="container",
         )
-        .configure(background="#ffffff")
+        .configure(background="transparent")
         .configure_view(
             strokeOpacity=0,
-            fill="#ffffff",
+            fill="transparent",
             continuousWidth=750,
             continuousHeight=480,
             opacity=1.0
         )
         .configure_axis(
-            labelFont="Sora, sans-serif",
-            titleFont="Sora, sans-serif",
+            labelFont="Outfit",
+            titleFont="Playfair Display",
             labelFontSize=12,
             titleFontSize=13,
-            labelColor="#334155",
-            titleColor="#0f172a",
-            gridOpacity=0.12,
-            gridColor="#e5e7eb"
+            labelColor="#6A7B82",
+            titleColor="#2C363F",
+            gridOpacity=0.6,
+            gridColor="#EAEAE4",
+            gridDash=[4, 4],
         )
         .configure_title(
-            font="Sora, sans-serif",
-            subtitleFont="Sora, sans-serif",
+            font="Playfair Display",
+            subtitleFont="Outfit",
             anchor="start",
-            color="#0f172a",
-            subtitleColor="#475569"
+            color="#2C363F",
+            subtitleColor="#6A7B82"
         )
         .configure_legend(
-            labelFont="Sora, sans-serif",
-            titleFont="Sora, sans-serif",
+            labelFont="Outfit",
+            titleFont="Outfit",
             padding=15,
             labelFontSize=11,
             titleFontSize=12,
-            labelColor="#334155",
-            titleColor="#0f172a"
+            labelColor="#6A7B82",
+            titleColor="#2C363F"
         )
         .configure_text(
-            font="Sora, sans-serif",
-            color="#0f172a"
+            font="Outfit",
+            color="#2C363F"
         )
         .configure_mark(
             opacity=0.9
@@ -898,40 +737,45 @@ def make_comparison_chart(chart_df: pd.DataFrame) -> alt.Chart:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Image2RCS Explorer", page_icon="✈️", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="RCS Analysis", page_icon="✈️", layout="wide", initial_sidebar_state="expanded")
     inject_styles()
 
     st.markdown(
         """
         <div class="hero">
-            <div class="hero-eyebrow">Image2RCS</div>
-            <h1>Radar Cross-Section (RCS) Explorer</h1>
-            <p>Upload an aircraft image, run inference, then place it on a comparative RCS map with nearby reference aircraft and percentile context.</p>
+            <div class="hero-eyebrow">Aviation Analysis</div>
+            <h1>Radar Cross-Section Estimation</h1>
+            <p>Upload a photograph to process an AI-driven estimate of the aircraft's Radar Cross-Section. The system will map your image against a curated database of known aviation signatures.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     with st.sidebar:
-        st.markdown("## ⚙️ Settings")
-        st.caption("Adjust model inputs and comparison density.")
-        checkpoint_path = st.text_input("Checkpoint path", value=str(DEFAULT_CHECKPOINT))
-        csv_path = st.text_input("Reference CSV path", value=str(DEFAULT_CSV))
-        compare_count = st.slider("Comparison entries", min_value=8, max_value=40, value=18, step=2)
-        show_profile = st.checkbox("Show inference timing", value=False)
+        st.markdown("## Configuration")
+        st.caption("Adjust model and comparison parameters.")
+        checkpoint_path = st.text_input("Model Checkpoint", value=str(DEFAULT_CHECKPOINT))
+        csv_path = st.text_input("Reference Database", value=str(DEFAULT_CSV))
+        compare_count = st.slider("Comparison Nodes", min_value=8, max_value=40, value=18, step=2)
+        show_profile = st.checkbox("Show processing metrics", value=False)
         device_options = ["auto", "cpu"]
         if torch.cuda.is_available():
             device_options.insert(1, "cuda")
         if mps_is_available():
             device_options.insert(1, "mps")
-        device_name = st.selectbox("Device", options=device_options, index=0)
-        if not torch.cuda.is_available() and not mps_is_available():
-            st.caption("No GPU backend detected. Running on CPU.")
+        device_name = st.selectbox("Compute Engine", options=device_options, index=0)
+        
+        st.markdown("---")
+        st.markdown("## Interpretability")
+        st.caption("Parameters for feature attribution mapping.")
+        patch_size = st.slider("Patch Size (px)", 5, 30, 15, help="Size of the occlusion window in pixels")
+        stride = st.slider("Stride (px)", 2, 20, 8, help="Step size for moving the occlusion window")
+        tile_threshold = st.slider("Detection Threshold", 0.0, 1.0, 0.65, help="Heatmap threshold for visual markers")
+
         st.markdown(
             """
             <div class="sidebar-note">
-                Comparison entries controls how many nearest reference aircraft are shown in the chart.
-                Nearness is computed in log-space to better reflect multiplicative RCS scales.
+                <strong>Note:</strong> Comparison proximity is calculated using logarithmic distance to better reflect the multiplicative scale of RCS values.
             </div>
             """,
             unsafe_allow_html=True,
@@ -940,93 +784,120 @@ def main() -> None:
     left_col, right_col = st.columns([1.25, 2.0], gap="large")
 
     with left_col:
-        st.markdown('<div class="section-kicker">Step 1</div><h3 class="section-head">Input Image</h3>', unsafe_allow_html=True)
+        st.markdown('<div class="section-kicker">Step 01</div><h3 class="section-head">Image Selection</h3>', unsafe_allow_html=True)
         uploaded_file = st.file_uploader(
-            "Upload aircraft image",
+            "Select an aircraft image",
             type=["jpg", "jpeg", "png", "webp", "bmp", "heic", "heif", "tif", "tiff"],
         )
         if uploaded_file is not None:
             try:
                 preview = load_uploaded_preview(uploaded_file)
-                render_responsive_image(preview, caption="Uploaded image preview")
+                render_responsive_image(preview, caption="Image successfully loaded")
                 st.markdown(
-                    '<p class="mini-note">Tip: front, side, or top views usually produce more stable comparisons.</p>',
+                    '<p class="mini-note">Tip: Orthogonal profiles (top, side, or front views) generally produce more accurate estimations.</p>',
                     unsafe_allow_html=True,
                 )
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                st.error(f"Could not preview this image format: {exc}")
+                st.error(f"Error processing image format: {exc}")
         else:
             st.markdown(
-                '<p class="mini-note">No file selected yet. Upload one image to run single-image inference.</p>',
+                '<p class="mini-note">Please upload an image to begin.</p>',
                 unsafe_allow_html=True,
             )
-        run_inference = render_full_width_button("Predict and Compare", type="primary")
+            
+        analyze_button = render_full_width_button("Analyze Image & Estimate RCS", type="primary")
 
     with right_col:
-        st.markdown('<div class="section-kicker">Step 2</div><h3 class="section-head">RCS Comparison</h3>', unsafe_allow_html=True)
+        st.markdown('<div class="section-kicker">Step 02</div><h3 class="section-head">Analysis Results</h3>', unsafe_allow_html=True)
 
-        if run_inference:
+        if analyze_button:
             if uploaded_file is None:
-                st.warning("Please upload an aircraft image first to proceed with prediction.")
+                st.warning("Please upload an image before proceeding with the analysis.")
             else:
                 try:
-                    reference_df = load_reference_table(csv_path)
-                    bundle = load_inference_bundle(checkpoint_path, device_name)
-                    st.caption(f"Runtime device: {describe_device(bundle[3])}")
-                    predicted_rcs, profile_stats = run_single_inference(uploaded_file, bundle)
+                    with st.spinner("Processing image and generating estimations..."):
+                        # Phase 1: Inference & Predictions
+                        reference_df = load_reference_table(csv_path)
+                        bundle = load_inference_bundle(checkpoint_path, device_name)
+                        model, transform, target_mode, device = bundle
+                        st.caption(f"Compute Engine Active: {describe_device(device)}")
+                        
+                        predicted_rcs, profile_stats = run_single_inference(uploaded_file, bundle)
 
-                    closest_idx = (reference_df["rcs"] - predicted_rcs).abs().idxmin()
-                    closest = reference_df.loc[closest_idx]
-                    closest_rcs = float(closest["rcs"])
-                    delta_rcs = predicted_rcs - closest_rcs
-                    ratio_to_closest = safe_rcs(predicted_rcs) / safe_rcs(closest_rcs)
-                    delta_db = 10.0 * math.log10(ratio_to_closest)
-                    percentile = compute_percentile(reference_df["rcs"], predicted_rcs)
+                        closest_idx = (reference_df["rcs"] - predicted_rcs).abs().idxmin()
+                        closest = reference_df.loc[closest_idx]
+                        closest_rcs = float(closest["rcs"])
+                        delta_rcs = predicted_rcs - closest_rcs
+                        ratio_to_closest = safe_rcs(predicted_rcs) / safe_rcs(closest_rcs)
+                        delta_db = 10.0 * math.log10(ratio_to_closest)
+                        percentile = compute_percentile(reference_df["rcs"], predicted_rcs)
 
-                    m1_col, m2_col, m3_col, m4_col = st.columns(4, gap="small")
-                    with m1_col:
-                        st.metric("Predicted RCS", format_rcs(predicted_rcs), f"{to_dbsm(predicted_rcs):+.2f} dBsm")
-                    with m2_col:
-                        st.metric("Closest Match", str(closest["aircraft_name"]))
-                    with m3_col:
-                        st.metric("Difference", format_rcs(delta_rcs), f"{delta_db:+.2f} dB")
-                    with m4_col:
-                        st.metric("Percentile Rank", f"{percentile:.1f}%")
+                        m1_col, m2_col, m3_col, m4_col = st.columns(4, gap="small")
+                        with m1_col:
+                            st.metric("Estimated RCS", format_rcs(predicted_rcs), f"{to_dbsm(predicted_rcs):+.2f} dBsm")
+                        with m2_col:
+                            st.metric("Nearest Match", str(closest["aircraft_name"]))
+                        with m3_col:
+                            st.metric("Variance", format_rcs(delta_rcs), f"{delta_db:+.2f} dB")
+                        with m4_col:
+                            st.metric("Percentile", f"{percentile:.1f}%")
 
-                    direction_text = "higher" if delta_rcs >= 0 else "lower"
-                    closest_name = escape(str(closest["aircraft_name"]))
-                    st.markdown(
-                        (
-                            f'<div class="result-note">✨ <div>Prediction is <strong>{format_rcs(abs(delta_rcs))} {direction_text}</strong> '
-                            f"than closest reference <strong>{closest_name}</strong> ({format_rcs(closest_rcs)}). "
-                            f"Relative offset: <strong>{delta_db:+.2f} dB</strong>.</div></div>"
-                        ),
-                        unsafe_allow_html=True,
-                    )
+                        direction_text = "higher" if delta_rcs >= 0 else "lower"
+                        closest_name = escape(str(closest["aircraft_name"]))
+                        st.markdown(
+                            (
+                                f'<div class="result-note">✨ Estimated RCS is <strong>{format_rcs(abs(delta_rcs))} {direction_text}</strong> '
+                                f"than the closest reference, the <strong>{closest_name}</strong> ({format_rcs(closest_rcs)}). "
+                                f"Relative variance: <strong>{delta_db:+.2f} dB</strong>.</div>"
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                        
+                        # Phase 2: Interpretability Plot
+                        st.markdown("#### Visual Feature Attribution")
+                        suffix = Path(uploaded_file.name).suffix or ".png"
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                            tmp.write(uploaded_file.getvalue())
+                            tmp_path = Path(tmp.name)
+                        
+                        fig, _ = generate_interpretation(
+                            image_path=tmp_path,
+                            model=model,
+                            transform=transform,
+                            target_mode=target_mode,
+                            device=device,
+                            patch_size=patch_size,
+                            stride=stride,
+                            tile_threshold=tile_threshold,
+                        )
+                        st.pyplot(fig, transparent=True)
+                        tmp_path.unlink(missing_ok=True)
+                        st.caption("Areas highlighted identify the features most influential in determining the final RCS estimation.")
 
-                    chart_df = build_comparison_dataset(reference_df, predicted_rcs, compare_count)
-                    chart = make_comparison_chart(chart_df)
-                    render_responsive_altair_chart(chart)
+                        # Phase 3: Charts & Data
+                        st.markdown("#### Database Comparison")
+                        chart_df = build_comparison_dataset(reference_df, predicted_rcs, compare_count)
+                        chart = make_comparison_chart(chart_df)
+                        render_responsive_altair_chart(chart)
 
-                    with st.expander("Show comparison table", expanded=False):
-                        table = chart_df.sort_values("rcs", ascending=False).reset_index(drop=True).copy()
-                        table["rcs_m2"] = table["rcs"].map(format_rcs)
-                        table["rcs_dbsm"] = table["rcs_safe"].map(lambda v: f"{to_dbsm(v):.2f}")
-                        table["delta_db"] = table["delta_db"].map(lambda v: f"{float(v):+.2f}")
-                        table["log_distance"] = table["distance_log"].map(lambda v: f"{float(v):.3f}")
-                        table = table[["aircraft_name", "aircraft_type", "source", "rcs_m2", "rcs_dbsm", "delta_db", "log_distance"]]
-                        render_responsive_dataframe(table, hide_index=True)
+                        with st.expander("View Detailed Comparison Data", expanded=False):
+                            table = chart_df.sort_values("rcs", ascending=False).reset_index(drop=True).copy()
+                            table["rcs_m2"] = table["rcs"].map(format_rcs)
+                            table["rcs_dbsm"] = table["rcs_safe"].map(lambda v: f"{to_dbsm(v):.2f}")
+                            table["delta_db"] = table["delta_db"].map(lambda v: f"{float(v):+.2f}")
+                            table["log_distance"] = table["distance_log"].map(lambda v: f"{float(v):.3f}")
+                            table = table[["aircraft_name", "aircraft_type", "source", "rcs_m2", "rcs_dbsm", "delta_db", "log_distance"]]
+                            render_responsive_dataframe(table, hide_index=True)
 
-                    if show_profile:
-                        with st.expander("Inference timing", expanded=False):
-                            st.json(profile_stats)
+                        if show_profile:
+                            with st.expander("View Processing Metrics", expanded=False):
+                                st.json(profile_stats)
                 except Exception as exc:
-                    st.error(f"❌ Inference failed: {exc}")
+                    st.error(f"An error occurred during analysis: {exc}")
 
         else:
             st.markdown(
-                '<div class="placeholder-note">✈️<br/><br/>Upload an image and click <strong>Predict and Compare</strong> '
-                "to place it against known aircraft references on the RCS scale.</div>",
+                '<div class="placeholder-note">Awaiting image upload.<br/>Select an image and click <strong>Analyze Image & Estimate RCS</strong> to continue.</div>',
                 unsafe_allow_html=True,
             )
 
