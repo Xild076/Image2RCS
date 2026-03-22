@@ -7,3 +7,5 @@
 *.DS_Store
 /data/inference_images
 /data/model_interp_occlusion
+/data/images
+*.h5

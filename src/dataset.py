@@ -25,9 +25,11 @@ except ImportError:  # Optional dependency; JPEG/PNG/WebP still work without it.
 else:
     register_heif_opener()
 
+import h5py
+import io
 
 ImageSample = Tuple[Path, float]
-CacheMode = Literal["off", "memory", "disk"]
+CacheMode = Literal["off", "memory", "disk", "hdf5"]
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif", ".tif", ".tiff"}
 _NORM_MEAN = [0.485, 0.456, 0.406]
 _NORM_STD = [0.229, 0.224, 0.225]
@@ -43,7 +45,7 @@ def resolve_image_folder(folder_value: str, images_root: Path) -> Path:
     return images_root / folder_path
 
 
-def load_image_samples(csv_path: str, images_root: str = "data/images") -> List[ImageSample]:
+def load_image_samples(csv_path: str, images_root: str = "data/images", hdf5_path: str = None) -> List[ImageSample]:
     csv_file = Path(csv_path)
     root = Path(images_root)
     df = pd.read_csv(csv_file)
@@ -55,17 +57,31 @@ def load_image_samples(csv_path: str, images_root: str = "data/images") -> List[
         raise ValueError(f"Missing required columns in {csv_file}: {missing_text}")
 
     samples: List[ImageSample] = []
-    for row in df.itertuples(index=False):
-        folder = resolve_image_folder(str(row.image_folder), root)
-        if not folder.exists() or not folder.is_dir():
-            continue
-        rcs_value = float(row.rcs)
-        image_files = [p for p in folder.iterdir() if p.suffix.lower() in _IMAGE_EXTENSIONS]
-        for image_file in sorted(image_files):
-            samples.append((image_file, rcs_value))
+    
+    # Check if we should read from HDF5 structure instead of disk
+    if hdf5_path and Path(hdf5_path).exists():
+        import h5py
+        with h5py.File(hdf5_path, 'r') as f:
+            for row in df.itertuples(index=False):
+                folder_name = Path(str(row.image_folder)).name
+                rcs_value = float(row.rcs)
+                if 'images' in f and folder_name in f['images']:
+                    for image_name in f['images'][folder_name].keys():
+                        # We use a dummy path, the dataset __getitem__ will extract relative name
+                        dummy_path = root / folder_name / image_name
+                        samples.append((dummy_path, rcs_value))
+    else:
+        for row in df.itertuples(index=False):
+            folder = resolve_image_folder(str(row.image_folder), root)
+            if not folder.exists() or not folder.is_dir():
+                continue
+            rcs_value = float(row.rcs)
+            image_files = [p for p in folder.iterdir() if p.suffix.lower() in _IMAGE_EXTENSIONS]
+            for image_file in sorted(image_files):
+                samples.append((image_file, rcs_value))
 
     if not samples:
-        raise ValueError("No image samples found. Check CSV paths and image directories.")
+        raise ValueError(f"No image samples found. Checked HDF5 ({hdf5_path}) and disk paths.")
 
     return samples
 
@@ -269,24 +285,64 @@ class AircraftRCSDataset(Dataset):
         cache_mode: CacheMode = "disk",
         cache_dir: str | Path | None = None,
         memory_cache_items: int = 256,
+        hdf5_path: str = "data/aircraft_dataset.h5",
     ):
         self.samples = list(samples)
         self.image_transform = image_transform if image_transform is not None else build_image_transform()
         self.target_mode = target_mode
-        self.image_cache = ImageTensorCache(
-            mode=cache_mode,
-            cache_dir=cache_dir,
-            max_memory_items=memory_cache_items,
-        )
+        self.cache_mode = cache_mode
+        self.hdf5_path = hdf5_path
+        self._h5f = None
+        self._h5f_pid = None
+
+        if self.cache_mode != "hdf5":
+            self.image_cache = ImageTensorCache(
+                mode=cache_mode,
+                cache_dir=cache_dir,
+                max_memory_items=memory_cache_items,
+            )
 
         targets = [transform_target(float(rcs_value), mode=target_mode) for _, rcs_value in self.samples]
         self.targets = torch.tensor(targets, dtype=torch.float32).unsqueeze(1)
+
+    def _get_h5_file(self):
+        pid = os.getpid()
+        if self._h5f is None or self._h5f_pid != pid:
+            self._h5f = h5py.File(self.hdf5_path, "r")
+            self._h5f_pid = pid
+        return self._h5f
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, index: int):
-        image_path, _ = self.samples[index]
-        image_tensor = self.image_cache.get(image_path)
-        image_tensor = self.image_transform(image_tensor)
-        return image_tensor, self.targets[index]
+        import random
+
+        while True:
+            image_path, _ = self.samples[index]
+
+            try:
+                if self.cache_mode == "hdf5":
+                    h5f = self._get_h5_file()
+                    # Try to get the file using a relative path to data/images
+                    try:
+                        rel_path = image_path.relative_to(Path("data/images")).as_posix()
+                    except ValueError:
+                        rel_path = image_path.name
+                    
+                    try:
+                        binary_data = h5f["images"][rel_path][()]
+                        with Image.open(io.BytesIO(binary_data)) as img:
+                            image_tensor = ImageTensorCache._pil_image_to_tensor(img)
+                    except Exception:
+                        # Fallback to standard reading if not found in HDF5 or corrupted
+                        image_tensor = ImageTensorCache._decode_to_tensor(image_path)
+                else:
+                    image_tensor = self.image_cache.get(image_path)
+
+                image_tensor = self.image_transform(image_tensor)
+                return image_tensor, self.targets[index]
+            except Exception as e:
+                # If image is completely unreadable from both HDF5 and disk,
+                # we randomly sample another index to avoid crashing DataLoader workers
+                index = random.randint(0, len(self.samples) - 1)
