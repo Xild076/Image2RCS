@@ -21,6 +21,11 @@ def main():
     parser.add_argument("--num-workers", type=str, default="auto")
     parser.add_argument("--cache-mode", type=str, default="memory", choices=["off", "memory", "disk"])
     parser.add_argument("--cache-dir", type=str, default=".cache/image2rcs")
+    parser.add_argument("--train-compression", type=str, default="auto", choices=["auto", "off", "on"])
+    parser.add_argument("--compression-group-size", type=int, default=8)
+    parser.add_argument("--compression-cache-dir", type=str, default=".cache/image2rcs/compressed")
+    parser.add_argument("--loader-recovery", type=str, default="auto", choices=["auto", "off"])
+    parser.add_argument("--max-load-retries", type=int, default=8)
     parser.add_argument("--cpu-threads", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="checkpoints/best_model.pt")
     parser.add_argument("--input", type=str, default="data/images/f-22_images")
@@ -44,6 +49,16 @@ def main():
             args.cache_mode,
             "--cache-dir",
             args.cache_dir,
+            "--train-compression",
+            args.train_compression,
+            "--compression-group-size",
+            str(args.compression_group_size),
+            "--compression-cache-dir",
+            args.compression_cache_dir,
+            "--loader-recovery",
+            args.loader_recovery,
+            "--max-load-retries",
+            str(args.max_load_retries),
             "--device",
             args.device,
             "--eval-every",

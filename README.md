@@ -54,11 +54,17 @@ Useful options:
 - `--hidden-dim N`: regression head hidden width (default `256`)
 - `--dropout P`: regression head dropout (default `0.2`)
 - `--se-reduction N`: channel-attention squeeze ratio for `resnet18_se` (default `16`)
-- `--cache-mode off|memory|disk`: image decode cache strategy (`disk` is fastest for repeat runs)
+- `--cache-mode off|memory|disk|hdf5`: image decode cache strategy (`hdf5` is best when source images are not on local disk)
 - `--memory-cache-items N`: cap RAM usage when `--cache-mode memory` (default `256`)
 - `--cache-dir PATH`: cache directory for disk mode
+- `--train-compression auto|off|on`: train-set medoid compression (`auto` enables for `resnet18_se`)
+- `--compression-group-size N`: similarity group size for compression (default `8`, ~6–8x reduction)
+- `--compression-cache-dir PATH`: cache path for compression manifests
+- `--compression-rebuild`: force rebuild of cached compression manifests
 - `--persistent-workers`: keep workers across epochs (faster, higher RAM)
 - `--prefetch-factor N`: prefetched batches per worker (default `1`, lower RAM)
+- `--loader-recovery auto|off`: retry once with safe loader settings if workers die
+- `--max-load-retries N`: per-sample decode retries before raising (default `8`)
 - `--cpu-threads N`: set Torch CPU thread count
 - `--eval-every N`: run validation every N epochs
 - `--profile`: print per-epoch timing split (`data_load`, `fwd_bwd`, `eval`, `ckpt_io`)

@@ -164,7 +164,7 @@ class ImageTensorCache:
     def _pil_image_to_tensor(image: Image.Image) -> torch.Tensor:
         normalized = ImageOps.exif_transpose(image)
         try:
-            if normalized.mode == "P" and "transparency" in normalized.info:
+            if normalized.mode == "P":
                 rgb = normalized.convert("RGBA").convert("RGB")
             else:
                 rgb = normalized.convert("RGB")
@@ -289,12 +289,16 @@ class AircraftRCSDataset(Dataset):
         cache_dir: str | Path | None = None,
         memory_cache_items: int = 256,
         hdf5_path: str = "data/aircraft_dataset.h5",
+        max_load_retries: int = 8,
     ):
         self.samples = list(samples)
         self.image_transform = image_transform if image_transform is not None else build_image_transform()
         self.target_mode = target_mode
         self.cache_mode = cache_mode
         self.hdf5_path = hdf5_path
+        if max_load_retries < 1:
+            raise ValueError("max_load_retries must be >= 1")
+        self.max_load_retries = int(max_load_retries)
         self._h5f = None
         self._h5f_pid = None
 
@@ -321,9 +325,13 @@ class AircraftRCSDataset(Dataset):
     def __getitem__(self, index: int):
         import random
 
-        while True:
-            image_path, _ = self.samples[index]
-
+        initial_index = int(index)
+        current_index = initial_index
+        last_error: Exception | None = None
+        last_image_path: Path | None = None
+        for attempt in range(self.max_load_retries):
+            image_path, _ = self.samples[current_index]
+            last_image_path = image_path
             try:
                 if self.cache_mode == "hdf5":
                     h5f = self._get_h5_file()
@@ -344,8 +352,15 @@ class AircraftRCSDataset(Dataset):
                     image_tensor = self.image_cache.get(image_path)
 
                 image_tensor = self.image_transform(image_tensor)
-                return image_tensor, self.targets[index]
-            except Exception as e:
-                # If image is completely unreadable from both HDF5 and disk,
-                # we randomly sample another index to avoid crashing DataLoader workers
-                index = random.randint(0, len(self.samples) - 1)
+                return image_tensor, self.targets[current_index]
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 >= self.max_load_retries:
+                    break
+                # Avoid worker-wide failures caused by a single bad sample.
+                current_index = random.randint(0, len(self.samples) - 1)
+
+        raise RuntimeError(
+            f"Failed to load image after {self.max_load_retries} attempts "
+            f"(initial_index={initial_index}, last_index={current_index}, last_path={last_image_path})"
+        ) from last_error

@@ -2,7 +2,9 @@ import argparse
 from collections import defaultdict
 from datetime import datetime, timezone
 import json
+import os
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -12,7 +14,7 @@ from torch import nn
 from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from dataset import AircraftRCSDataset, build_image_transform, inverse_transform_target_tensor, load_image_samples
@@ -25,6 +27,7 @@ from device_utils import (
 )
 from model import SUPPORTED_MODEL_TYPES, build_model, normalize_model_type, resolve_model_config
 from perf_utils import autotune_num_workers, configure_cpu_threads, format_worker_timings, parse_num_workers
+from train_compression import build_or_load_train_compression, resolve_train_compression_enabled
 import ssl
 
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -74,6 +77,59 @@ def split_samples(samples, val_split: float, seed: int):
     return train_samples, val_samples
 
 
+class WeightedSampleDataset(Dataset):
+    def __init__(self, base_dataset: Dataset, sample_weights: list[float]):
+        if len(base_dataset) != len(sample_weights):
+            raise ValueError("sample_weights length must match base_dataset length")
+        self.base_dataset = base_dataset
+        self.sample_weights = torch.tensor(sample_weights, dtype=torch.float32)
+
+    def __len__(self) -> int:
+        return len(self.base_dataset)
+
+    def __getitem__(self, index: int):
+        image, target = self.base_dataset[index]
+        return image, target, self.sample_weights[index]
+
+
+def reduce_per_sample_loss(per_sample_loss: torch.Tensor, sample_weights: torch.Tensor | None = None) -> torch.Tensor:
+    if per_sample_loss.ndim > 1:
+        per_sample_loss = per_sample_loss.reshape(per_sample_loss.shape[0], -1).mean(dim=1)
+    else:
+        per_sample_loss = per_sample_loss.reshape(-1)
+
+    if sample_weights is None:
+        return per_sample_loss.mean()
+
+    weights = sample_weights.reshape(-1).to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    denom = torch.clamp(weights.sum(), min=1e-8)
+    return torch.sum(per_sample_loss * weights) / denom
+
+
+def _effective_batch_weight(sample_weights: torch.Tensor | None, batch_size: int) -> float:
+    if sample_weights is None:
+        return float(batch_size)
+    return float(sample_weights.reshape(-1).sum().item())
+
+
+def is_dataloader_worker_failure(error: RuntimeError) -> bool:
+    message = str(error).lower()
+    if "dataloader worker" in message:
+        return True
+    if "worker (pid" in message and "killed" in message:
+        return True
+    if "exited unexpectedly" in message and "worker" in message:
+        return True
+    return False
+
+
+def should_enable_default_pbar() -> bool:
+    if os.getenv("KAGGLE_URL_BASE") or os.getenv("KAGGLE_KERNEL_RUN_TYPE"):
+        return False
+    stream = sys.stderr
+    return bool(hasattr(stream, "isatty") and stream.isatty())
+
+
 def create_dataloaders(
     csv_path: str,
     images_root: str,
@@ -90,12 +146,37 @@ def create_dataloaders(
     persistent_workers: bool,
     prefetch_factor: int,
     profile: bool,
+    model_type: str,
+    train_compression: str,
+    compression_group_size: int,
+    compression_cache_dir: str,
+    compression_rebuild: bool,
+    max_load_retries: int,
     hdf5_path: str = "data/aircraft_dataset.h5",
 ):
     samples = load_image_samples(csv_path=csv_path, images_root=images_root, hdf5_path=hdf5_path if cache_mode == "hdf5" else None)
     train_samples, val_samples = split_samples(samples, val_split=val_split, seed=seed)
 
-    train_dataset = AircraftRCSDataset(
+    train_sample_weights: list[float] | None = None
+    compression_result = None
+    normalized_model_type = normalize_model_type(model_type)
+    compression_enabled = resolve_train_compression_enabled(train_compression, normalized_model_type)
+    if compression_enabled:
+        compression_result = build_or_load_train_compression(
+            train_samples=train_samples,
+            csv_path=csv_path,
+            images_root=images_root,
+            hdf5_path=hdf5_path if cache_mode == "hdf5" else None,
+            split_seed=seed,
+            val_split=val_split,
+            group_size=compression_group_size,
+            cache_dir=compression_cache_dir,
+            rebuild=compression_rebuild,
+        )
+        train_samples = compression_result.samples
+        train_sample_weights = compression_result.sample_weights
+
+    train_dataset_base = AircraftRCSDataset(
         samples=train_samples,
         image_transform=build_image_transform(image_size=image_size, train=True),
         target_mode=target_mode,
@@ -103,6 +184,12 @@ def create_dataloaders(
         cache_dir=cache_dir,
         memory_cache_items=memory_cache_items,
         hdf5_path=hdf5_path,
+        max_load_retries=max_load_retries,
+    )
+    train_dataset = (
+        WeightedSampleDataset(train_dataset_base, train_sample_weights)
+        if train_sample_weights is not None
+        else train_dataset_base
     )
     val_dataset = AircraftRCSDataset(
         samples=val_samples,
@@ -112,6 +199,7 @@ def create_dataloaders(
         cache_dir=cache_dir,
         memory_cache_items=memory_cache_items,
         hdf5_path=hdf5_path,
+        max_load_retries=max_load_retries,
     )
 
     pin_memory = device.type == "cuda"
@@ -155,14 +243,29 @@ def create_dataloaders(
             f"(auto timings: {format_worker_timings(worker_timings)})"
         )
 
+    if compression_result is not None:
+        print(
+            "[compression] "
+            f"train_samples={compression_result.original_count} -> {compression_result.compressed_count} "
+            f"(ratio={compression_result.ratio:.2f}x, effective_weight_sum={compression_result.effective_weight_sum:.0f}, "
+            f"cache={'hit' if compression_result.cache_hit else 'miss'})"
+        )
+
     return train_loader, val_loader
 
 class RelativeHuberLoss(nn.Module):
-    def __init__(self, target_mode: str, relative_floor: float = 0.05, beta: float = 0.2):
+    def __init__(
+        self,
+        target_mode: str,
+        relative_floor: float = 0.05,
+        beta: float = 0.2,
+        reduction: str = "mean",
+    ):
         super().__init__()
         self.target_mode = target_mode
         self.relative_floor = relative_floor
         self.beta = beta
+        self.reduction = reduction
 
     def forward(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         pred_raw = inverse_transform_target_tensor(prediction, mode=self.target_mode)
@@ -178,7 +281,14 @@ class RelativeHuberLoss(nn.Module):
             0.5 * (rel_error ** 2) / self.beta,
             abs_rel - 0.5 * self.beta,
         )
-        return loss.mean()
+        per_sample = loss.reshape(loss.shape[0], -1).mean(dim=1)
+        if self.reduction == "none":
+            return per_sample
+        if self.reduction == "sum":
+            return per_sample.sum()
+        if self.reduction == "mean":
+            return per_sample.mean()
+        raise ValueError(f"Unsupported reduction: {self.reduction}")
 
 
 class HybridRCSLoss(nn.Module):
@@ -189,38 +299,56 @@ class HybridRCSLoss(nn.Module):
         smoothl1_beta: float = 0.25,
         relative_floor: float = 0.05,
         relative_beta: float = 0.2,
+        reduction: str = "mean",
     ):
         super().__init__()
         self.alpha = alpha
-        self.abs_loss = nn.SmoothL1Loss(beta=smoothl1_beta)
+        self.reduction = reduction
+        self.abs_loss = nn.SmoothL1Loss(beta=smoothl1_beta, reduction="none")
         self.rel_loss = RelativeHuberLoss(
             target_mode=target_mode,
             relative_floor=relative_floor,
             beta=relative_beta,
+            reduction="none",
         )
 
     def forward(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        abs_component = self.abs_loss(prediction, target)
+        abs_component = self.abs_loss(prediction, target).reshape(prediction.shape[0], -1).mean(dim=1)
         rel_component = self.rel_loss(prediction, target)
-        return self.alpha * abs_component + (1.0 - self.alpha) * rel_component
+        per_sample = self.alpha * abs_component + (1.0 - self.alpha) * rel_component
+        if self.reduction == "none":
+            return per_sample
+        if self.reduction == "sum":
+            return per_sample.sum()
+        if self.reduction == "mean":
+            return per_sample.mean()
+        raise ValueError(f"Unsupported reduction: {self.reduction}")
 
 def run_epoch(model, loader, criterion, optimizer, device, scaler, epoch=None, show_pbar=True):
     model.train()
     total_loss = 0.0
-    total_count = 0
+    total_count = 0.0
     data_load_time = 0.0
     forward_backward_time = 0.0
     wait_start = time.perf_counter()
 
     desc = f"Epoch {epoch} Train" if epoch is not None else "Training"
-    pbar = tqdm(loader, desc=desc, leave=False, disable=not show_pbar)
-    for images, targets in pbar:
+    pbar = tqdm(loader, desc=desc, leave=False, disable=not show_pbar, mininterval=1.0)
+    for batch in pbar:
         data_load_time += time.perf_counter() - wait_start
         step_start = time.perf_counter()
+
+        if isinstance(batch, (tuple, list)) and len(batch) == 3:
+            images, targets, sample_weights = batch
+        else:
+            images, targets = batch
+            sample_weights = None
 
         non_blocking = device.type in ["cuda", "mps"]
         images = images.to(device, non_blocking=non_blocking)
         targets = targets.to(device, non_blocking=non_blocking)
+        if sample_weights is not None:
+            sample_weights = sample_weights.to(device, non_blocking=non_blocking)
 
         optimizer.zero_grad(set_to_none=True)
         
@@ -228,7 +356,8 @@ def run_epoch(model, loader, criterion, optimizer, device, scaler, epoch=None, s
         amp_device = device.type if amp_enabled else "cpu"
         with autocast(device_type=amp_device, enabled=amp_enabled):
             predictions = model(images)
-            loss = criterion(predictions, targets)
+            per_sample_loss = criterion(predictions, targets)
+            loss = reduce_per_sample_loss(per_sample_loss, sample_weights)
 
         if hasattr(scaler, "scale") and scaler.is_enabled():
             scaler.scale(loss).backward()
@@ -239,8 +368,9 @@ def run_epoch(model, loader, criterion, optimizer, device, scaler, epoch=None, s
             optimizer.step()
 
         batch_size = images.size(0)
-        total_loss += loss.item() * batch_size
-        total_count += batch_size
+        batch_weight = _effective_batch_weight(sample_weights, batch_size)
+        total_loss += loss.item() * batch_weight
+        total_count += batch_weight
         
         pbar.set_postfix({"loss": f"{total_loss / total_count:.4f}"})
         
@@ -254,18 +384,44 @@ def run_epoch(model, loader, criterion, optimizer, device, scaler, epoch=None, s
     return total_loss / max(total_count, 1), stats
 
 
+def run_epoch_with_loader_recovery(
+    train_step,
+    rebuild_safe_loaders,
+    *,
+    loader_recovery: str,
+):
+    recovered = False
+    attempts = 0
+    while True:
+        try:
+            result = train_step()
+            return result, recovered
+        except RuntimeError as error:
+            can_retry = (
+                loader_recovery == "auto"
+                and not recovered
+                and attempts == 0
+                and is_dataloader_worker_failure(error)
+            )
+            if not can_retry:
+                raise
+            rebuild_safe_loaders(error)
+            recovered = True
+            attempts += 1
+
+
 @torch.inference_mode()
 def evaluate(model, loader, criterion, device, target_mode: str, epoch=None, show_pbar=True):
     model.eval()
     total_loss = 0.0
-    total_count = 0
+    total_count = 0.0
     abs_error_sum = 0.0
     data_load_time = 0.0
     eval_compute_time = 0.0
     wait_start = time.perf_counter()
 
     desc = f"Epoch {epoch} Eval" if epoch is not None else "Evaluating"
-    pbar = tqdm(loader, desc=desc, leave=False, disable=not show_pbar)
+    pbar = tqdm(loader, desc=desc, leave=False, disable=not show_pbar, mininterval=1.0)
     for images, targets in pbar:
         data_load_time += time.perf_counter() - wait_start
         step_start = time.perf_counter()
@@ -278,7 +434,8 @@ def evaluate(model, loader, criterion, device, target_mode: str, epoch=None, sho
         amp_device = device.type if amp_enabled else "cpu"
         with autocast(device_type=amp_device, enabled=amp_enabled):
             predictions = model(images)
-            loss = criterion(predictions, targets)
+            per_sample_loss = criterion(predictions, targets)
+            loss = reduce_per_sample_loss(per_sample_loss)
 
         pred_values = predictions.squeeze(1)
         target_values = targets.squeeze(1)
@@ -436,6 +593,30 @@ def main():
     parser.add_argument("--hdf5-path", type=str, default="data/aircraft_dataset.h5", help="Path to HDF5 database if cache-mode is hdf5")
     parser.add_argument("--cache-dir", type=str, default=".cache/image2rcs")
     parser.add_argument(
+        "--train-compression",
+        type=str,
+        default="auto",
+        choices=["auto", "off", "on"],
+        help='Train-set compression mode: "auto" enables it for resnet18_se.',
+    )
+    parser.add_argument(
+        "--compression-group-size",
+        type=int,
+        default=8,
+        help="Similarity group size for medoid compression.",
+    )
+    parser.add_argument(
+        "--compression-cache-dir",
+        type=str,
+        default=".cache/image2rcs/compressed",
+        help="Path to cached compression manifests.",
+    )
+    parser.add_argument(
+        "--compression-rebuild",
+        action="store_true",
+        help="Force regeneration of the compression manifest.",
+    )
+    parser.add_argument(
         "--memory-cache-items",
         type=int,
         default=256,
@@ -460,7 +641,21 @@ def main():
     parser.add_argument("--relative-floor", type=float, default=0.05)
     parser.add_argument("--relative-beta", type=float, default=0.2)
     parser.add_argument("--smoothl1-beta", type=float, default=0.25)
+    parser.add_argument(
+        "--loader-recovery",
+        type=str,
+        default="auto",
+        choices=["auto", "off"],
+        help="Auto-retry once with safe DataLoader settings when a worker dies.",
+    )
+    parser.add_argument(
+        "--max-load-retries",
+        type=int,
+        default=8,
+        help="Max image decode retries per dataset item before raising an error.",
+    )
     parser.add_argument("--no-pbar", action="store_true", help="Disable the per-epoch progress bars")
+    parser.add_argument("--force-pbar", action="store_true", help="Force progress bars even in non-interactive runtimes")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -481,6 +676,10 @@ def main():
         raise ValueError("--memory-cache-items must be >= 1")
     if args.prefetch_factor < 1:
         raise ValueError("--prefetch-factor must be >= 1")
+    if args.compression_group_size < 2:
+        raise ValueError("--compression-group-size must be >= 2")
+    if args.max_load_retries < 1:
+        raise ValueError("--max-load-retries must be >= 1")
     if args.hidden_dim < 1:
         raise ValueError("--hidden-dim must be >= 1")
     if not (0.0 <= args.dropout < 1.0):
@@ -501,6 +700,8 @@ def main():
         if details:
             print(f"[warn] CUDA detected but unusable with this Torch build. Falling back to {device}. Details: {details}")
     print(f"Using device: {describe_device(device)}")
+
+    model_type = normalize_model_type(args.model_type)
     train_loader, val_loader = create_dataloaders(
         csv_path=args.csv_path,
         images_root=args.images_root,
@@ -517,10 +718,15 @@ def main():
         persistent_workers=args.persistent_workers,
         prefetch_factor=args.prefetch_factor,
         profile=args.profile,
+        model_type=model_type,
+        train_compression=args.train_compression,
+        compression_group_size=args.compression_group_size,
+        compression_cache_dir=args.compression_cache_dir,
+        compression_rebuild=args.compression_rebuild,
+        max_load_retries=args.max_load_retries,
         hdf5_path=args.hdf5_path,
     )
 
-    model_type = normalize_model_type(args.model_type)
     model_config = resolve_model_config(
         model_type=model_type,
         hidden_dim=args.hidden_dim,
@@ -604,15 +810,17 @@ def main():
             smoothl1_beta=args.smoothl1_beta,
             relative_floor=args.relative_floor,
             relative_beta=args.relative_beta,
+            reduction="none",
         )
     elif args.loss == "relative-huber":
         criterion = RelativeHuberLoss(
             target_mode=args.target_mode,
             relative_floor=args.relative_floor,
             beta=args.relative_beta,
+            reduction="none",
         )
     else:
-        criterion = nn.SmoothL1Loss(beta=args.smoothl1_beta)
+        criterion = nn.SmoothL1Loss(beta=args.smoothl1_beta, reduction="none")
 
     optimizer_kwargs = {"lr": args.learning_rate, "weight_decay": args.weight_decay}
     if device.type == "cuda":
@@ -644,10 +852,62 @@ def main():
     quality_history: list[dict] = []
     quality_log_path = output_path.with_name(f"{output_path.stem}_quality_log.json")
 
-    show_pbar = not args.no_pbar
-    for epoch in tqdm(range(start_epoch, args.epochs + 1)):
+    show_pbar = args.force_pbar or ((not args.no_pbar) and should_enable_default_pbar())
+    if not show_pbar and not args.no_pbar and not args.force_pbar:
+        print("[info] Progress bars auto-disabled for non-interactive runtime.")
+
+    for epoch in range(start_epoch, args.epochs + 1):
         epoch_start = time.perf_counter()
-        train_loss, train_stats = run_epoch(model, train_loader, criterion, optimizer, device, scaler, epoch=epoch, show_pbar=show_pbar)
+
+        def train_step():
+            return run_epoch(
+                model,
+                train_loader,
+                criterion,
+                optimizer,
+                device,
+                scaler,
+                epoch=epoch,
+                show_pbar=show_pbar,
+            )
+
+        def rebuild_safe_loaders(error: RuntimeError):
+            nonlocal train_loader, val_loader, show_pbar
+            print(f"[warn] DataLoader worker failure detected: {error}")
+            print("[warn] Rebuilding DataLoaders with safe settings and retrying this epoch once.")
+            train_loader, val_loader = create_dataloaders(
+                csv_path=args.csv_path,
+                images_root=args.images_root,
+                image_size=args.image_size,
+                batch_size=args.batch_size,
+                num_workers="0",
+                val_split=args.val_split,
+                seed=args.seed,
+                target_mode=args.target_mode,
+                device=device,
+                cache_mode=args.cache_mode,
+                cache_dir=args.cache_dir,
+                memory_cache_items=args.memory_cache_items,
+                persistent_workers=False,
+                prefetch_factor=1,
+                profile=args.profile,
+                model_type=model_type,
+                train_compression=args.train_compression,
+                compression_group_size=args.compression_group_size,
+                compression_cache_dir=args.compression_cache_dir,
+                compression_rebuild=False,
+                max_load_retries=args.max_load_retries,
+                hdf5_path=args.hdf5_path,
+            )
+            show_pbar = False
+
+        (train_loss, train_stats), recovered_this_epoch = run_epoch_with_loader_recovery(
+            train_step,
+            rebuild_safe_loaders,
+            loader_recovery=args.loader_recovery,
+        )
+        if recovered_this_epoch:
+            print("[info] Epoch resumed with safe DataLoader settings.")
 
         val_loss = None
         val_mae = None
@@ -657,9 +917,59 @@ def main():
 
         should_evaluate = (epoch % args.eval_every == 0) or (epoch == args.epochs)
         if should_evaluate:
-            eval_start = time.perf_counter()
-            val_loss, val_mae, eval_stats = evaluate(model, val_loader, criterion, device, args.target_mode, epoch=epoch, show_pbar=show_pbar)
-            eval_total_time = time.perf_counter() - eval_start
+            try:
+                eval_start = time.perf_counter()
+                val_loss, val_mae, eval_stats = evaluate(
+                    model,
+                    val_loader,
+                    criterion,
+                    device,
+                    args.target_mode,
+                    epoch=epoch,
+                    show_pbar=show_pbar,
+                )
+                eval_total_time = time.perf_counter() - eval_start
+            except RuntimeError as error:
+                if args.loader_recovery != "auto" or not is_dataloader_worker_failure(error):
+                    raise
+                print(f"[warn] Validation DataLoader failure detected: {error}")
+                print("[warn] Rebuilding validation loader with safe settings and retrying evaluation.")
+                _, val_loader = create_dataloaders(
+                    csv_path=args.csv_path,
+                    images_root=args.images_root,
+                    image_size=args.image_size,
+                    batch_size=args.batch_size,
+                    num_workers="0",
+                    val_split=args.val_split,
+                    seed=args.seed,
+                    target_mode=args.target_mode,
+                    device=device,
+                    cache_mode=args.cache_mode,
+                    cache_dir=args.cache_dir,
+                    memory_cache_items=args.memory_cache_items,
+                    persistent_workers=False,
+                    prefetch_factor=1,
+                    profile=args.profile,
+                    model_type=model_type,
+                    train_compression=args.train_compression,
+                    compression_group_size=args.compression_group_size,
+                    compression_cache_dir=args.compression_cache_dir,
+                    compression_rebuild=False,
+                    max_load_retries=args.max_load_retries,
+                    hdf5_path=args.hdf5_path,
+                )
+                show_pbar = False
+                eval_start = time.perf_counter()
+                val_loss, val_mae, eval_stats = evaluate(
+                    model,
+                    val_loader,
+                    criterion,
+                    device,
+                    args.target_mode,
+                    epoch=epoch,
+                    show_pbar=False,
+                )
+                eval_total_time = time.perf_counter() - eval_start
             scheduler.step(val_loss)
             learning_rate = float(optimizer.param_groups[0]["lr"])
             quality_record = build_quality_record(

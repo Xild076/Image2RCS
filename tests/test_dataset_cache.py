@@ -2,6 +2,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 from pathlib import Path
 
 import torch
@@ -71,6 +72,26 @@ class TestDatasetCache(unittest.TestCase):
             stats = cache.stats()
             self.assertEqual(stats["memory_entries"], 2)
             self.assertGreaterEqual(stats["evictions"], 1)
+
+    def test_palette_transparency_bytes_converts_without_warning(self):
+        image = Image.new("P", (4, 4))
+        palette = []
+        for channel in range(256):
+            palette.extend([channel, 0, 0])
+        image.putpalette(palette)
+        image.info["transparency"] = bytes(range(256))
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            tensor = ImageTensorCache._pil_image_to_tensor(image)
+        image.close()
+
+        self.assertIsInstance(tensor, torch.Tensor)
+        warning_messages = [str(item.message) for item in caught]
+        self.assertFalse(
+            any("Palette images with Transparency expressed in bytes" in msg for msg in warning_messages),
+            msg=f"Unexpected warning(s): {warning_messages}",
+        )
 
 
 if __name__ == "__main__":
