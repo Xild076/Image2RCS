@@ -9,4 +9,5 @@ altair>=5.0.0
 pyrender>=0.1.45
 trimesh>=4.0.0
 captum>=0.7.0
-tqdm>=4.0.0h5py>=3.10.0
+tqdm>=4.0.0
+h5py>=3.10.0
