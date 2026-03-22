@@ -164,7 +164,10 @@ class ImageTensorCache:
     def _pil_image_to_tensor(image: Image.Image) -> torch.Tensor:
         normalized = ImageOps.exif_transpose(image)
         try:
-            rgb = normalized.convert("RGB")
+            if normalized.mode == "P" and "transparency" in normalized.info:
+                rgb = normalized.convert("RGBA").convert("RGB")
+            else:
+                rgb = normalized.convert("RGB")
             try:
                 return TF.pil_to_tensor(rgb).contiguous()
             finally:
