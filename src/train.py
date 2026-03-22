@@ -565,9 +565,6 @@ def main():
         start_epoch = checkpoint.get("epoch", 0) + 1
         best_val_loss = checkpoint.get("best_val_loss", float("inf"))
 
-    if args.compile:
-        print("Compiling model (this may take a minute...)")
-        model = torch.compile(model)
 
     if device.type == "cuda":
         usable_ids = usable_cuda_device_indices()
@@ -592,6 +589,13 @@ def main():
             print(f"Multi-GPU: DataParallel enabled on CUDA devices {requested_ids}")
         else:
             print(f"Single-GPU mode on cuda:{primary_idx} (usable CUDA devices: {usable_ids})")
+            
+    if args.compile:
+        print("Compiling model (this may take a minute...)")
+        model = torch.compile(model)
+
+            
+
 
     if args.loss == "hybrid":
         criterion = HybridRCSLoss(
