@@ -204,7 +204,7 @@ class HybridRCSLoss(nn.Module):
         rel_component = self.rel_loss(prediction, target)
         return self.alpha * abs_component + (1.0 - self.alpha) * rel_component
 
-def run_epoch(model, loader, criterion, optimizer, device, scaler, epoch=None):
+def run_epoch(model, loader, criterion, optimizer, device, scaler, epoch=None, show_pbar=True):
     model.train()
     total_loss = 0.0
     total_count = 0
@@ -213,7 +213,7 @@ def run_epoch(model, loader, criterion, optimizer, device, scaler, epoch=None):
     wait_start = time.perf_counter()
 
     desc = f"Epoch {epoch} Train" if epoch is not None else "Training"
-    pbar = tqdm(loader, desc=desc, leave=False)
+    pbar = tqdm(loader, desc=desc, leave=False, disable=not show_pbar)
     for images, targets in pbar:
         data_load_time += time.perf_counter() - wait_start
         step_start = time.perf_counter()
@@ -255,7 +255,7 @@ def run_epoch(model, loader, criterion, optimizer, device, scaler, epoch=None):
 
 
 @torch.inference_mode()
-def evaluate(model, loader, criterion, device, target_mode: str, epoch=None):
+def evaluate(model, loader, criterion, device, target_mode: str, epoch=None, show_pbar=True):
     model.eval()
     total_loss = 0.0
     total_count = 0
@@ -265,7 +265,7 @@ def evaluate(model, loader, criterion, device, target_mode: str, epoch=None):
     wait_start = time.perf_counter()
 
     desc = f"Epoch {epoch} Eval" if epoch is not None else "Evaluating"
-    pbar = tqdm(loader, desc=desc, leave=False)
+    pbar = tqdm(loader, desc=desc, leave=False, disable=not show_pbar)
     for images, targets in pbar:
         data_load_time += time.perf_counter() - wait_start
         step_start = time.perf_counter()
@@ -460,6 +460,7 @@ def main():
     parser.add_argument("--relative-floor", type=float, default=0.05)
     parser.add_argument("--relative-beta", type=float, default=0.2)
     parser.add_argument("--smoothl1-beta", type=float, default=0.25)
+    parser.add_argument("--no-pbar", action="store_true", help="Disable the per-epoch progress bars")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -639,10 +640,10 @@ def main():
     quality_history: list[dict] = []
     quality_log_path = output_path.with_name(f"{output_path.stem}_quality_log.json")
 
-    
+    show_pbar = not args.no_pbar
     for epoch in tqdm(range(start_epoch, args.epochs + 1)):
         epoch_start = time.perf_counter()
-        train_loss, train_stats = run_epoch(model, train_loader, criterion, optimizer, device, scaler, epoch=epoch)
+        train_loss, train_stats = run_epoch(model, train_loader, criterion, optimizer, device, scaler, epoch=epoch, show_pbar=show_pbar)
 
         val_loss = None
         val_mae = None
@@ -653,7 +654,7 @@ def main():
         should_evaluate = (epoch % args.eval_every == 0) or (epoch == args.epochs)
         if should_evaluate:
             eval_start = time.perf_counter()
-            val_loss, val_mae, eval_stats = evaluate(model, val_loader, criterion, device, args.target_mode, epoch=epoch)
+            val_loss, val_mae, eval_stats = evaluate(model, val_loader, criterion, device, args.target_mode, epoch=epoch, show_pbar=show_pbar)
             eval_total_time = time.perf_counter() - eval_start
             scheduler.step(val_loss)
             learning_rate = float(optimizer.param_groups[0]["lr"])
