@@ -139,6 +139,7 @@ def create_dataloaders(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
+        drop_last=True,
         **loader_common,
     )
     val_loader = DataLoader(
@@ -532,6 +533,41 @@ def main():
         model_type=model_type,
         model_config=model_config,
     ).to(device)
+
+    best_val_loss = float("inf")
+    start_epoch = 1
+    opt_state = None
+    sched_state = None
+
+    if hasattr(args, "resume") and args.resume:
+        print(f"Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        state_dict = checkpoint["model_state_dict"]
+        # Strip prefixes
+        stripped = {}
+        for k, v in state_dict.items():
+            if k.startswith("_orig_mod."):
+                stripped[k[10:]] = v
+            elif k.startswith("module."):
+                stripped[k[7:]] = v
+            else:
+                stripped[k] = v
+        # Try strict first, then unstrict
+        try:
+            model.load_state_dict(stripped, strict=True)
+        except RuntimeError as e:
+            print(f"Warning: strict load failed, trying non-strict. {e}")
+            model.load_state_dict(stripped, strict=False)
+
+        opt_state = checkpoint.get("optimizer_state_dict")
+        sched_state = checkpoint.get("scheduler_state_dict")
+        start_epoch = checkpoint.get("epoch", 0) + 1
+        best_val_loss = checkpoint.get("best_val_loss", float("inf"))
+
+    if args.compile:
+        print("Compiling model (this may take a minute...)")
+        model = torch.compile(model)
+
     if device.type == "cuda":
         usable_ids = usable_cuda_device_indices()
         requested_ids = parse_gpu_id_list(args.gpu_ids, usable_ids)
@@ -555,6 +591,7 @@ def main():
             print(f"Multi-GPU: DataParallel enabled on CUDA devices {requested_ids}")
         else:
             print(f"Single-GPU mode on cuda:{primary_idx} (usable CUDA devices: {usable_ids})")
+
     if args.loss == "hybrid":
         criterion = HybridRCSLoss(
             target_mode=args.target_mode,
@@ -571,12 +608,24 @@ def main():
         )
     else:
         criterion = nn.SmoothL1Loss(beta=args.smoothl1_beta)
+
     optimizer_kwargs = {"lr": args.learning_rate, "weight_decay": args.weight_decay}
     if device.type == "cuda":
         optimizer_kwargs["fused"] = True
     optimizer = AdamW(model.parameters(), **optimizer_kwargs)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
-    
+
+    if opt_state is not None:
+        try:
+            optimizer.load_state_dict(opt_state)
+        except Exception as e:
+            print(f"Warning: Could not load optimizer: {e}")
+    if sched_state is not None:
+        try:
+            scheduler.load_state_dict(sched_state)
+        except Exception as e:
+            print(f"Warning: Could not load scheduler: {e}")
+
     amp_enabled = device.type in ["cuda", "mps"]
     scaler_device = device.type if device.type in ["cuda", "mps"] else "cpu"
     try:
@@ -585,41 +634,6 @@ def main():
     except:
         from torch.cuda.amp import GradScaler
         scaler = GradScaler(enabled=amp_enabled) if device.type == "cuda" else GradScaler(enabled=False)
-
-    best_val_loss = float("inf")
-    start_epoch = 1
-    if hasattr(args, "resume") and args.resume:
-        print(f"Resuming from checkpoint: {args.resume}")
-        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        state_dict = checkpoint["model_state_dict"]
-        # Strip prefixes
-        stripped = {}
-        for k, v in state_dict.items():
-            if k.startswith("_orig_mod."):
-                stripped[k[10:]] = v
-            elif k.startswith("module."):
-                stripped[k[7:]] = v
-            else:
-                stripped[k] = v
-        # Try strict first, then unstrict
-        try:
-            model.load_state_dict(stripped, strict=True)
-        except RuntimeError as e:
-            print(f"Warning: strict load failed, trying non-strict. {e}")
-            model.load_state_dict(stripped, strict=False)
-
-        try:
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        except Exception as e:
-            print(f"Warning: Could not load optimizer: {e}")
-        start_epoch = checkpoint.get("epoch", 0) + 1
-        best_val_loss = checkpoint.get("best_val_loss", float("inf"))
-
-    if args.compile:
-        print("Compiling model (this may take a minute...)")
-        model = torch.compile(model)
-
 
     profile_rows: list[dict[str, float]] = []
     quality_history: list[dict] = []
